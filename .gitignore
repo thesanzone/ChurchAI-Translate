@@ -1,0 +1,17 @@
+# Virtual Environment & downloaded assets
+venv/
+ENV/
+env/
+
+# Downloaded models & voice files
+*.onnx
+*.onnx.json
+
+# Caches
+.cache/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# System files
+.DS_Store
