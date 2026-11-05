@@ -252,7 +252,30 @@ else
     echo "[✓] es_MX-ald-medium.onnx.json already exists in venv/models."
 fi
 
-# 6. Verify Tool Versions & System Capabilities
+# 6. Pre-cache Speech-to-Text and Translation AI Models
+echo ""
+echo "[+] Checking AI model caches (Whisper STT & NLLB Translation)..."
+python3 -c "
+import os, sys, warnings, logging
+os.environ['HF_HOME'] = '$HF_CACHE_DIR'
+os.environ['TORCH_HOME'] = '$TORCH_CACHE_DIR'
+warnings.filterwarnings('ignore')
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
+
+from faster_whisper import WhisperModel
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+print('[+] Checking Whisper Base model...')
+WhisperModel('base.en', download_root='$MODELS_DIR/whisper')
+print('[✓] Whisper Base model is cached in venv/models/whisper.')
+
+print('[+] Checking NLLB-200 translation model...')
+AutoTokenizer.from_pretrained('facebook/nllb-200-distilled-600M', cache_dir='$HF_CACHE_DIR')
+AutoModelForSeq2SeqLM.from_pretrained('facebook/nllb-200-distilled-600M', cache_dir='$HF_CACHE_DIR')
+print('[✓] NLLB-200 model is cached in venv/models/huggingface.')
+"
+
+# 7. Verify Tool Versions & System Capabilities
 echo ""
 echo "=== System Verification Check ==="
 python3 -c "

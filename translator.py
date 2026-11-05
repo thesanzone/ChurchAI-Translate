@@ -163,6 +163,7 @@ print("==========================================", flush=True)
 
 # 1. Load Whisper Speech-to-Text
 print("\n[+] Loading Speech-to-Text (Whisper Base Real-Time)...", flush=True)
+print("    (Downloading model assets if first run ~140MB)...", flush=True)
 stt_model = WhisperModel(
     STT_MODEL_NAME,
     device="cpu",
@@ -170,9 +171,10 @@ stt_model = WhisperModel(
     cpu_threads=6,
     download_root=WHISPER_CACHE_DIR,
 )
+print("[✓] Speech-to-Text engine loaded successfully.", flush=True)
 
 # 2. Load NLLB-200 Translation Model
-print(f"[+] Loading NLLB-200 Translation Model on {device_type.upper()}...", flush=True)
+print(f"\n[+] Loading NLLB-200 Translation Model on {device_type.upper()}...", flush=True)
 try:
     tokenizer = AutoTokenizer.from_pretrained(
         TRANSLATION_MODEL_NAME,
@@ -186,6 +188,7 @@ try:
         local_files_only=True,
     ).to(device_type)
 except Exception:
+    print("    (Downloading NLLB-200 model weights into venv/models ~2.4GB - please wait)...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(
         TRANSLATION_MODEL_NAME,
         src_lang="eng_Latn",
@@ -195,15 +198,17 @@ except Exception:
         TRANSLATION_MODEL_NAME,
         cache_dir=HF_CACHE_DIR,
     ).to(device_type)
+print("[✓] NLLB-200 Translation model loaded successfully.", flush=True)
 
 TARGET_LANG_ID = tokenizer.convert_tokens_to_ids("spa_Latn")
 
 # 3. Preload Piper TTS into Memory (eliminates 1.1s subprocess spawn latency)
-print(f"[+] Preloading In-Memory Piper TTS Voice ({TTS_VOICE})...", flush=True)
+print(f"\n[+] Preloading In-Memory Piper TTS Voice ({TTS_VOICE})...", flush=True)
 piper_voice = PiperVoice.load(VOICE_FILE_PATH, config_path=CONFIG_FILE_PATH)
 # Warm up ONNX runtime
 for _ in piper_voice.synthesize("listo"):
     pass
+print("[✓] Piper TTS voice engine warmed up and ready.", flush=True)
 
 
 def translate_text(text):
@@ -368,10 +373,22 @@ try:
         blocksize=BLOCK_SIZE,
         callback=audio_callback,
     ):
-        print("=== LIVE HIGH-SPEED TRANSLATION RUNNING ===", flush=True)
-        print(f"[*] Input Device:  [{INPUT_DEVICE_ID}] {INPUT_NAME}", flush=True)
-        print(f"[*] Output Device: [{OUTPUT_DEVICE_ID}] {OUTPUT_NAME}", flush=True)
-        print("[*] Ready and listening! Speak into your microphone to translate...\n", flush=True)
+        print("\n" + "=" * 60, flush=True)
+        print("  🟢 CHURCH AI TRANSLATOR IS ONLINE & ACTIVELY LISTENING", flush=True)
+        print("=" * 60, flush=True)
+        print(f"  [*] Input Device:   [{INPUT_DEVICE_ID}] {INPUT_NAME}", flush=True)
+        print(f"  [*] Output Device:  [{OUTPUT_DEVICE_ID}] {OUTPUT_NAME}", flush=True)
+        print("  [*] Status:         ACTIVE — Speak into your microphone now!", flush=True)
+        print("=" * 60 + "\n", flush=True)
+
+        # Trigger macOS native notification & audio chime
+        try:
+            os.system(
+                "osascript -e 'display notification \"Live speech translation is active and listening!\" with title \"Church AI Translation\" subtitle \"System Ready\" sound name \"Glass\"' 2>/dev/null"
+            )
+        except Exception:
+            pass
+
         while True:
             sd.sleep(1000)
 except KeyboardInterrupt:
