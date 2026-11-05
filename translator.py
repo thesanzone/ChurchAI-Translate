@@ -29,8 +29,13 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from piper.voice import PiperVoice
 from piper.config import SynthesisConfig
 
-# Suppress harmless OpenSSL warning from urllib3 on macOS
+# Suppress harmless warnings from urllib3 and Hugging Face Hub
 warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
+warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+warnings.filterwarnings("ignore", module="huggingface_hub")
+
+import logging
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 # Ensure unbuffered real-time stdout streaming
 if hasattr(sys.stdout, "reconfigure"):
