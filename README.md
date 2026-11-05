@@ -83,10 +83,13 @@ System Settings → Privacy & Security → Microphone.
 | `launcher.applescript` | Source code for the .app. Only needed if you want to change how the app launches. |
 | `README.md` | This guide. |
 
-### No longer needed
+### Archived (no longer used)
 
-| File | Why |
+The `Archived/` folder keeps the old files for reference. Nothing in the app uses them,
+and the folder can be deleted once you're happy with the new window.
+
+| File | Why it was retired |
 |---|---|
-| `translator.py` | Replaced by `engine.py` + `app.py`. Still works on its own as a Terminal-only fallback, so you can keep it until you trust the new window. |
-| `configure_audio.py` | Replaced by the device lists in the window. Nothing calls it any more. |
-| `churchaitranslate.conf` (in this folder) | Settings now live in `~/ChurchAI/churchaitranslate.conf`. This copy is only read if that file doesn't exist. Safe to delete. |
+| `Archived/translator.py` | Replaced by `engine.py` + `app.py`. To use it as a Terminal-only fallback, move it back next to `venv/` first; it won't find the models from inside `Archived/`. |
+| `Archived/configure_audio.py` | Replaced by the device lists in the window. |
+| `Archived/churchaitranslate.conf` | Settings now live in `~/ChurchAI/churchaitranslate.conf`. |
