@@ -222,7 +222,7 @@ pip install --upgrade pip --quiet
 
 echo "[+] Installing AI, Audio, Tokenizer, and TTS Python packages..."
 pip install --upgrade torch torchvision torchaudio
-pip install --upgrade sounddevice configparser numpy faster-whisper transformers piper-tts sentencepiece protobuf
+pip install --upgrade sounddevice configparser numpy faster-whisper transformers piper-tts sentencepiece protobuf PySide6
 
 # 5. Download Piper Latin American Spanish Voice Model & Config File
 echo "[+] Checking for Latin American Spanish Piper TTS voice assets in venv/models..."
@@ -279,7 +279,7 @@ print('[✓] NLLB-200 model is cached in venv/models/huggingface.')
 echo ""
 echo "=== System Verification Check ==="
 python3 -c "
-import sys, torch, sounddevice as sd, faster_whisper, transformers, sentencepiece
+import sys, torch, sounddevice as sd, faster_whisper, transformers, sentencepiece, PySide6
 print(f'Python Version:       {sys.version.split()[0]}')
 print(f'PyTorch Version:      {torch.__version__}')
 print(f'Apple Metal (MPS):    {torch.backends.mps.is_available()}')
@@ -287,10 +287,10 @@ print(f'Faster-Whisper:       Installed')
 print(f'Transformers:         {transformers.__version__}')
 print(f'SentencePiece:        Installed')
 print(f'SoundDevice (Audio):  {sd.__version__}')
+print(f'PySide6 (Window):     {PySide6.__version__}')
 "
 
 echo ""
 echo "=== Setup Complete! ==="
-echo "Your Mac is fully configured. You can now run:"
-echo "  python3 configure_audio.py"
-echo "  python3 translator.py"
+echo "Your Mac is fully configured."
+echo "From now on, double-click 'Church AI Translation.app' to open the translator."

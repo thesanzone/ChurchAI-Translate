@@ -1,9 +1,20 @@
 #!/bin/bash
+# Church AI Translation launcher.
+#   ./start_translation.sh          -> run setup only if needed, then open the app window
+#   ./start_translation.sh --setup  -> force a full setup/repair first
 set -e
 
-# Target project directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
+
+# Strip macOS quarantine flags from downloaded archive and ensure executables have +x permissions
+xattr -dr com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*.command 2>/dev/null || true
+
+if [ "$EUID" -eq 0 ]; then
+    echo " [!] Please do NOT run this script using 'sudo'."
+    exit 1
+fi
 
 # Load Homebrew environment if installed
 if [ -f "/opt/homebrew/bin/brew" ]; then
@@ -12,79 +23,29 @@ elif [ -f "/usr/local/bin/brew" ]; then
     eval "$(/usr/local/bin/brew shellenv)"
 fi
 
-# Check Administrator Privileges
-if [ "$EUID" -eq 0 ]; then
-    echo ""
-    echo "=================================================================="
-    echo " [!] ERROR: Please do NOT run this script using 'sudo'."
-    echo "=================================================================="
-    echo " Homebrew and Python virtual environments must be run by a"
-    echo " standard user account with administrative rights."
-    echo " The script will automatically prompt you for your administrator"
-    echo " password when elevated access is required."
-    echo "=================================================================="
-    exit 1
-fi
-
-IS_ADMIN=0
-if command -v dsmemberutil &>/dev/null; then
-    if dsmemberutil checkmembership -U "$USER" -G admin &>/dev/null; then
-        IS_ADMIN=1
-    fi
-fi
-if [ "$IS_ADMIN" -eq 0 ]; then
-    if id -Gn "$USER" 2>/dev/null | grep -qw "admin"; then
-        IS_ADMIN=1
-    fi
-fi
-
-if [ "$IS_ADMIN" -ne 1 ]; then
-    echo ""
-    echo "=================================================================="
-    echo " [!] ERROR: Administrator Privileges Required"
-    echo "=================================================================="
-    echo " This script must be run from an account with Administrator"
-    echo " privileges on this Mac at this time."
-    echo ""
-    echo " Current user: '$USER' (Standard Account)"
-    echo ""
-    echo " Please log into a macOS Administrator account, or have an"
-    echo " Administrator grant '$USER' admin rights in:"
-    echo "   System Settings -> Users & Groups"
-    echo "=================================================================="
-    exit 1
-fi
-
-# Ensure all cache and model downloads are saved inside venv
+# Keep all model downloads inside the venv
 export HF_HOME="$SCRIPT_DIR/venv/models/huggingface"
 export TORCH_HOME="$SCRIPT_DIR/venv/models/torch"
 export PIP_CACHE_DIR="$SCRIPT_DIR/venv/.cache/pip"
 
-echo "=================================================="
-echo "    CHURCH AI TRANSLATION MASTER LAUNCHER"
-echo "=================================================="
+PY="$SCRIPT_DIR/venv/bin/python3"
 
-# 1. Validate & Setup Mac Environment
-echo ""
-echo "[Step 1/3] Validating system setup & dependencies..."
-if [ -f "$SCRIPT_DIR/setup_mac.sh" ]; then
+is_installed() {
+    [ -x "$PY" ] && "$PY" -c "import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ['PySide6','sounddevice','faster_whisper','transformers','piper']) else 1)" &>/dev/null
+}
+
+if [ "$1" = "--setup" ] || ! is_installed; then
+    echo "=================================================="
+    echo "    CHURCH AI TRANSLATION — FIRST-TIME SETUP"
+    echo "=================================================="
+    echo " This installs everything the translator needs."
+    echo " It needs an Administrator account and can take"
+    echo " 10-20 minutes the first time."
+    echo "=================================================="
     bash "$SCRIPT_DIR/setup_mac.sh"
-else
-    echo "[!] Error: setup_mac.sh not found in $SCRIPT_DIR"
-    exit 1
 fi
 
-# Activate Python Virtual Environment
 echo ""
-echo "[+] Activating Python virtual environment..."
-source "$SCRIPT_DIR/venv/bin/activate"
-
-# 2. Configure Audio Hardware Mapping
-echo ""
-echo "[Step 2/3] Launching Audio Device Configurator..."
-python3 "$SCRIPT_DIR/configure_audio.py"
-
-# 3. Start Live Translation System
-echo ""
-echo "[Step 3/3] Starting Live AI Translation System..."
-python3 "$SCRIPT_DIR/translator.py"
+echo "[+] Opening the Church AI Translation window..."
+mkdir -p "$HOME/ChurchAI/logs"
+exec "$PY" "$SCRIPT_DIR/app.py"
