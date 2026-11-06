@@ -76,7 +76,10 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         case .enhanced: q = " (Enhanced)"
         default: q = ""
         }
-        return "\(v.name), \(region)\(q)"
+        // Downloaded voices often already carry the quality in their name, e.g. "Juan (Enhanced)".
+        let name = v.name.replacingOccurrences(of: q.trimmingCharacters(in: .whitespaces), with: "")
+            .trimmingCharacters(in: .whitespaces)
+        return "\(q.isEmpty ? v.name : name), \(region)\(q)"
     }
 
     func start(outputDeviceUID: String?) throws {
