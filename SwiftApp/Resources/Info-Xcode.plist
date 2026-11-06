@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>2.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2.1</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Church Translate listens to the preacher's microphone so it can translate the sermon into Spanish.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
