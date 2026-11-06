@@ -30,7 +30,10 @@ os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
 os.environ.setdefault("TORCH_HOME", TORCH_CACHE_DIR)
 
 STT_MODEL_NAME = "base.en"
-TRANSLATION_MODEL_NAME = "facebook/nllb-200-distilled-600M"
+# NLLB-200 1.3B: noticeably more accurate than the 600M model (about 5.5 GB download).
+# If it isn't downloaded and there's no internet, the engine falls back to the 600M model.
+TRANSLATION_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
+FALLBACK_TRANSLATION_MODEL = "facebook/nllb-200-distilled-600M"
 TTS_VOICE = "es_MX-ald-medium"
 VOICE_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_MX/ald/medium"
 
@@ -164,21 +167,7 @@ class TranslatorEngine:
         )
 
         self._status("loading", "Loading translation model (2 of 3)…")
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
-        try:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                TRANSLATION_MODEL_NAME, src_lang="eng_Latn",
-                cache_dir=HF_CACHE_DIR, local_files_only=True)
-            self._translator = AutoModelForSeq2SeqLM.from_pretrained(
-                TRANSLATION_MODEL_NAME, cache_dir=HF_CACHE_DIR,
-                local_files_only=True).to(self._device_type)
-        except Exception:
-            self._status("loading", "Downloading translation model (about 2.4 GB, first run only)…")
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                TRANSLATION_MODEL_NAME, src_lang="eng_Latn", cache_dir=HF_CACHE_DIR)
-            self._translator = AutoModelForSeq2SeqLM.from_pretrained(
-                TRANSLATION_MODEL_NAME, cache_dir=HF_CACHE_DIR).to(self._device_type)
+        self._load_translator(torch)
         self._target_lang_id = self._tokenizer.convert_tokens_to_ids("spa_Latn")
 
         self._status("loading", "Loading Spanish voice (3 of 3)…")
@@ -193,6 +182,45 @@ class TranslatorEngine:
         # Background workers live for the life of the app
         threading.Thread(target=self._playback_worker, daemon=True).start()
         threading.Thread(target=self._processing_worker, daemon=True).start()
+
+    def _load_translator(self, torch):
+        """Load NLLB 1.3B (downloading it once if needed); fall back to 600M when offline."""
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        # Half precision on the Apple GPU: half the memory, faster, same translations in practice
+        dtype = torch.float16 if self._device_type == "mps" else torch.float32
+
+        def load(name, local_only):
+            tok = AutoTokenizer.from_pretrained(
+                name, src_lang="eng_Latn", cache_dir=HF_CACHE_DIR, local_files_only=local_only)
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                name, cache_dir=HF_CACHE_DIR, local_files_only=local_only, dtype=dtype)
+            return tok, model.to(self._device_type).eval()
+
+        attempts = [
+            (TRANSLATION_MODEL_NAME, True, None),
+            (TRANSLATION_MODEL_NAME, False,
+             "Downloading the larger translation model (about 5.5 GB, first run only)…"),
+            (FALLBACK_TRANSLATION_MODEL, True, None),
+            (FALLBACK_TRANSLATION_MODEL, False,
+             "Downloading translation model (about 2.4 GB, first run only)…"),
+        ]
+        last_error = None
+        for name, local_only, message in attempts:
+            if message:
+                self._status("loading", message)
+            try:
+                self._tokenizer, self._translator = load(name, local_only)
+                self.translation_model_name = name
+                if name != TRANSLATION_MODEL_NAME:
+                    self._log(f"[!] Using the smaller translation model ({name}); "
+                              "connect to the internet once to download the larger one.")
+                else:
+                    self._log(f"[+] Translation model: {name}")
+                return
+            except Exception as e:
+                last_error = e
+        raise EngineError(f"The translation model couldn't be loaded or downloaded. ({last_error})")
 
     def _ensure_voice_files(self):
         voice = os.path.join(MODELS_DIR, f"{TTS_VOICE}.onnx")

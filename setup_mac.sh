@@ -269,10 +269,10 @@ print('[+] Checking Whisper Base model...')
 WhisperModel('base.en', download_root='$MODELS_DIR/whisper')
 print('[✓] Whisper Base model is cached in venv/models/whisper.')
 
-print('[+] Checking NLLB-200 translation model...')
-AutoTokenizer.from_pretrained('facebook/nllb-200-distilled-600M', cache_dir='$HF_CACHE_DIR')
-AutoModelForSeq2SeqLM.from_pretrained('facebook/nllb-200-distilled-600M', cache_dir='$HF_CACHE_DIR')
-print('[✓] NLLB-200 model is cached in venv/models/huggingface.')
+print('[+] Checking NLLB-200 1.3B translation model (about 5.5 GB the first time)...')
+AutoTokenizer.from_pretrained('facebook/nllb-200-distilled-1.3B', cache_dir='$HF_CACHE_DIR')
+AutoModelForSeq2SeqLM.from_pretrained('facebook/nllb-200-distilled-1.3B', cache_dir='$HF_CACHE_DIR')
+print('[✓] NLLB-200 1.3B model is cached in venv/models/huggingface.')
 "
 
 # 7. Verify Tool Versions & System Capabilities

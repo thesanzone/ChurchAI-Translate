@@ -45,7 +45,7 @@ Transcripts of every session are saved automatically in
 ## For the person setting up the Mac
 
 First-time setup needs a macOS **Administrator** account and an internet connection
-(it downloads about 3 GB of AI models). Double-click **Church AI Translation.app**:
+(it downloads about 6 GB of AI models, mostly the NLLB-200 1.3B translation model). Double-click **Church AI Translation.app**:
 if anything is missing, it opens Terminal and runs setup automatically, then opens
 the window. After that, daily use does **not** need an admin account or Terminal.
 
