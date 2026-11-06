@@ -1,9 +1,41 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+
+/// Quits the app when its last window is closed (normally a Mac app keeps running in the Dock),
+/// and asks before quitting (⌘Q) while a service is being translated. The window's close button
+/// is disabled while translating (ContentView), so the question never appears after the window
+/// is gone, and closing the alert can't count as "last window closed" and re-trigger it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: TranslatorModel?
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model, model.isListening else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Stop translating and quit?"
+        alert.informativeText = "Church Translate is translating right now. Quitting stops the Spanish voice and captions."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Keep Translating")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        Task { @MainActor in
+            await model.stop()   // closes the transcript file and lets the Mac sleep again
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+#endif
 
 @main
 struct ChurchTranslateApp: App {
     // The App struct is created once, so a plain constant holds the single shared model.
     private let model = TranslatorModel()
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #endif
 
     var body: some Scene {
         WindowGroup("Church Translate") {
@@ -33,6 +65,9 @@ struct ChurchTranslateApp: App {
     /// and `--quit-when-done` exits when it finishes (output is printed to the console).
     @MainActor
     private func launch() async {
+        #if os(macOS)
+        appDelegate.model = model
+        #endif
         setvbuf(stdout, nil, _IOLBF, 0)   // print each line immediately (useful when logging to a file)
         print("[launch] preparing models")
         await model.prepare()

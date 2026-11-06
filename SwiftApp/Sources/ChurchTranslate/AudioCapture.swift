@@ -179,7 +179,7 @@ final class AudioCapture: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .noMicrophone: "No microphone was found. Check the audio interface is plugged in."
-            case .cantSelect: "Couldn't open the chosen microphone. Unplug it and plug it back in, press Refresh device list, then try again."
+            case .cantSelect: "Couldn't open the chosen microphone. Unplug it and plug it back in, press Refresh Devices and Voices, then try again."
             }
         }
     }

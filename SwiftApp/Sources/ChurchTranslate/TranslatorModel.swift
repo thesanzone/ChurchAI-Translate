@@ -241,6 +241,13 @@ final class TranslatorModel {
         return list
     }
 
+    /// True when the voice in use is one of Apple's basic voices, which sound robotic.
+    var usingBasicAppleVoice: Bool {
+        guard voiceID != PiperVoice.identifier else { return false }
+        let v = voiceID.flatMap { AVSpeechSynthesisVoice(identifier: $0) } ?? voices.first
+        return v.map { $0.quality == .default } ?? true
+    }
+
     var currentVoiceName: String {
         voiceOptions.first { $0.id == voiceID }?.name ?? "Default"
     }

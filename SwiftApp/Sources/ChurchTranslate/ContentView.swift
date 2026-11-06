@@ -33,6 +33,11 @@ struct ContentView: View {
             bottomBar
         }
         .frame(minWidth: 900, minHeight: 560)
+        #if os(macOS)
+        // While translating, grey out the red close button so a stray click can't stop a service.
+        // (Press Stop first. Quitting with ⌘Q still asks: see AppDelegate.)
+        .windowDismissBehavior(model.isListening ? .disabled : .automatic)
+        #endif
         .sheet(isPresented: $ui.showSettings) { SettingsView() }
         #if os(iOS)
         .fullScreenCover(isPresented: $ui.showCaptions) {
@@ -161,7 +166,8 @@ struct ContentView: View {
             }
             .labelsHidden()
             .disabled(model.isListening)
-            Button("Refresh device list") { model.refreshDevices() }
+            Button("Refresh Devices and Voices") { model.refreshDevices() }
+                .help("Re-reads the microphones, speakers and installed Spanish voices")
                 .disabled(model.isListening)
                 .frame(maxWidth: .infinity)
             #else
@@ -207,6 +213,22 @@ struct ContentView: View {
             Button("Test speakers", systemImage: "speaker.wave.2") { model.testSpeakers() }
                 .frame(maxWidth: .infinity)
                 .disabled(model.isListening)
+
+            if model.usingBasicAppleVoice {
+                // Easy to miss in Settings, so also warn here before a service starts.
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("The Spanish voice is a basic Apple voice and sounds robotic.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Choose a better voice…") { ui.showSettings = true }
+                        .controlSize(.small)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
         }
         .padding(16)
     }
@@ -317,49 +339,117 @@ struct SettingsView: View {
 
     var body: some View {
         @Bindable var model = model
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             Text("Settings").font(.title2.weight(.semibold))
+                .padding([.horizontal, .top], 24)
+                .padding(.bottom, 4)
             Form {
-                HStack {
-                    Picker("Spanish voice", selection: Binding(
-                        get: { model.voiceID },
-                        set: { model.chooseVoice($0) })) {
-                        ForEach(model.voiceOptions, id: \.id) { v in
-                            Text(v.name).tag(Optional(v.id))
+                // MARK: Voice
+                Section {
+                    HStack {
+                        Picker("Spanish voice", selection: Binding(
+                            get: { model.voiceID },
+                            set: { model.chooseVoice($0) })) {
+                            ForEach(model.voiceOptions, id: \.id) { v in
+                                Text(v.name).tag(Optional(v.id))
+                            }
                         }
+                        Button("Preview") { model.testSpeakers() }
+                            .disabled(model.isListening)
+                            .help("Plays a short Spanish sentence with the chosen voice")
                     }
-                    Button("Preview") { model.testSpeakers() }
-                        .disabled(model.isListening)
+                    Toggle("Faster Spanish speech", isOn: $model.fastSpeech)
+                    #if os(macOS)
+                    HStack {
+                        Button("Open Voice Settings…", systemImage: "gearshape") { Self.openVoiceSettings() }
+                            .help("Opens System Settings → Accessibility → Spoken Content")
+                        Button("Refresh Voices", systemImage: "arrow.clockwise") { model.refreshDevices() }
+                            .disabled(model.isListening)
+                            .help("Reloads the list after you download or remove a voice")
+                    }
+                    #endif
+                    if model.usingBasicAppleVoice || (model.voiceID != PiperVoice.identifier && SpanishSpeaker.onlyBasicVoices) {
+                        Label {
+                            Text("The chosen voice is one of Apple's basic voices and sounds robotic. "
+                                 + "Pick the built-in voice, or download a Premium or Enhanced voice (steps below).")
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                        .font(.callout.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    voiceHelp
+                } header: {
+                    Text("Voice Settings").font(.headline)
                 }
-                Toggle("Faster Spanish speech", isOn: $model.fastSpeech)
-                HStack {
-                    Text("Caption text size")
-                    Slider(value: $model.captionSize, in: 28...120, step: 2)
-                    Text("\(Int(model.captionSize)) pt").monospacedDigit().frame(width: 52)
+
+                // MARK: Captions
+                Section {
+                    HStack {
+                        Text("Caption text size")
+                        Slider(value: $model.captionSize, in: 28...120, step: 2)
+                        Text("\(Int(model.captionSize)) pt").monospacedDigit().frame(width: 52)
+                    }
+                    Text("Size of the Spanish text in the captions window (for a projector or TV).")
+                        .font(.callout).foregroundStyle(.secondary)
+                } header: {
+                    Text("Caption Text Settings").font(.headline)
                 }
             }
-            if model.voiceID != PiperVoice.identifier, SpanishSpeaker.onlyBasicVoices {
-                Label {
-                    Text("Only the basic Spanish voice is installed, which sounds robotic. "
-                         + "Download a natural-sounding one (free, one time):")
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                }
-                .font(.callout.weight(.medium))
-            }
-            Text("Mac: System Settings → Accessibility → Read & Speak (or Spoken Content) → System Voice → "
-                 + "Manage Voices → Spanish (Mexico) → Paulina (Enhanced or Premium).\n"
-                 + "iPad: Settings → Accessibility → Read & Speak (or Spoken Content) → Voices → Spanish.\n"
-                 + "Then come back here; the new voice appears in the list.")
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .formStyle(.grouped)
             HStack {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
+            .padding([.horizontal, .bottom], 24)
+            .padding(.top, 8)
         }
-        .padding(24)
-        .frame(width: 560)
+        .frame(width: 640, height: 720)
         .onAppear { model.refreshDevices() }   // picks up newly downloaded voices
     }
+
+    /// How the voice list is built, and how to add better voices.
+    private var voiceHelp: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("About the voice list").font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 4) {
+                bullet("**Built in (Piper)**: always available and works offline. The same voice as the Python app.")
+                bullet("**Apple**: every Spanish voice installed on this Mac. Best first: Premium, then Enhanced, then basic; Mexican Spanish ahead of Spain.")
+                bullet("**Hidden**: voices in other languages, and Apple's novelty voices (Eddy, Flo, Grandpa, Rocko and similar), which sound robotic.")
+                bullet("**Premium** sounds the most natural. **Basic** voices (no label) sound robotic; avoid them for services.")
+            }
+            #if os(macOS)
+            Text("Add a better Apple voice (free, one time per Mac)").font(.subheadline.weight(.semibold)).padding(.top, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                bullet("1. Click **Open Voice Settings…** above. System Settings opens at Accessibility → Spoken Content.")
+                bullet("2. Open the **System voice** menu and choose **Manage Voices…** at the bottom.")
+                bullet("3. Find **Spanish (Mexico)** and tick **Paulina (Premium)** or **Paulina (Enhanced)**. Wait for the download to finish.")
+                bullet("4. Come back here and click **Refresh Voices**. Pick the new voice in the list, then click **Preview**.")
+                bullet("To remove a voice later, untick it in the same Manage Voices list.")
+            }
+            #else
+            Text("Add a better voice: Settings → Accessibility → Spoken Content → Voices → Spanish. "
+                 + "Download a Premium or Enhanced voice, then come back here and pick it.")
+            #endif
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func bullet(_ text: LocalizedStringKey) -> some View {
+        Text(text).fixedSize(horizontal: false, vertical: true)
+    }
+
+    #if os(macOS)
+    /// System Settings → Accessibility → Spoken Content, at the "System voice" setting.
+    /// AX_SPOKEN_VOICE is the anchor System Settings lists for that setting on macOS 27
+    /// (`tell application "System Settings" to get name of every anchor of current pane`).
+    /// If a macOS version doesn't know the anchor, System Settings still opens at Accessibility,
+    /// and the written steps beside the button cover the rest.
+    static func openVoiceSettings() {
+        let link = "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?AX_SPOKEN_VOICE"
+        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+    }
+    #endif
 }
