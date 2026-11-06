@@ -1,6 +1,9 @@
 -- Source for "Church AI Translation.app". To rebuild the app after editing:
 --   osacompile -o "Church AI Translation.app" launcher.applescript
+--   cp SwiftApp/Resources/AppIcon.icns "Church AI Translation.app/Contents/Resources/applet.icns"
+--   /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "Church AI Translation.app/Contents/Info.plist"
 --   codesign --force --deep -s - "Church AI Translation.app"
+-- (The two middle lines restore the app icon, which osacompile resets to the default.)
 --
 -- If everything is installed, opens the translator window directly (no Terminal).
 -- Otherwise opens Terminal and runs first-time setup.

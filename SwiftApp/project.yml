@@ -1,0 +1,44 @@
+# XcodeGen spec for the Mac + iPad app (needs full Xcode).
+#   brew install xcodegen
+#   cd SwiftApp && xcodegen generate && open ChurchTranslate.xcodeproj
+name: ChurchTranslate
+options:
+  bundleIdPrefix: org.churchai
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  ChurchTranslate:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Sources/ChurchTranslate
+      - path: Resources/Assets.xcassets
+    info:
+      path: Resources/Info-Xcode.plist
+      properties:
+        CFBundleDisplayName: Church Translate
+        NSMicrophoneUsageDescription: Church Translate listens to the preacher's microphone so it can translate the sermon into Spanish.
+        NSSpeechRecognitionUsageDescription: Church Translate turns the preacher's speech into text on this device so it can be translated.
+        UIBackgroundModes: [audio]
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.churchai.translate
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "2"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Resources/ChurchTranslate.entitlements
+        CODE_SIGN_STYLE: Automatic
