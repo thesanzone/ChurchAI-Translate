@@ -13,6 +13,9 @@ struct ChurchTranslateApp: App {
         }
         #if os(macOS)
         .defaultSize(width: 1100, height: 660)
+        // Always open the control panel at launch. If macOS restored "no windows" instead,
+        // the app would sit there without loading anything (launch() runs from the window).
+        .restorationBehavior(.disabled)
         #endif
 
         #if os(macOS)
@@ -42,6 +45,21 @@ struct ChurchTranslateApp: App {
                 }
             }
             await model.startFile(URL(fileURLWithPath: args[i + 1]))
+        }
+        // `--test-mic <seconds>`: listen on the saved microphone, report whether sound arrived, then quit.
+        if let i = args.firstIndex(of: "--test-mic"), model.state == .ready {
+            let seconds = i + 1 < args.count ? Double(args[i + 1]) ?? 5 : 5
+            Task { @MainActor in
+                var loudest: Float = 0
+                let end = Date().addingTimeInterval(seconds)
+                while Date() < end {
+                    try? await Task.sleep(for: .milliseconds(50))
+                    loudest = max(loudest, model.inputPeak)
+                }
+                print("[mic test] state: \(model.state), sound arrived: \(model.heardAnySignal), loudest peak: \(loudest)")
+                exit(model.heardAnySignal ? 0 : 1)
+            }
+            await model.startMicrophone()
         }
     }
 }

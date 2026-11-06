@@ -41,6 +41,15 @@ From Terminal, the same test can run without sound and print the translations:
 "build/Church Translate.app/Contents/MacOS/ChurchTranslate" --test-file sermon.m4a --mute --quit-when-done
 ```
 
+To check the saved microphone delivers sound (prints the result and quits after 6 seconds):
+
+```bash
+open -n -W --stdout "$(tty)" "build/Church Translate.app" --args --test-mic 6 --mute
+```
+
+The app is signed only locally, so after each rebuild macOS asks for microphone permission
+again; click **Allow**.
+
 ### Piper voice & licensing
 
 On Mac the default voice is **Piper — Mexican Spanish** (`es_MX-ald-medium`), the same

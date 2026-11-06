@@ -119,6 +119,10 @@ struct ContentView: View {
         case .error(let msg): return (.red, msg)
         case .listening:
             let since = model.lastSpeech ?? model.startedAt ?? now
+            if model.playingFile == nil, !model.heardAnySignal,
+               let start = model.startedAt, now.timeIntervalSince(start) > 3 {
+                return (.red, "No sound at all from the microphone. Check it's plugged in and not muted. (The MacBook's built-in mic is off while the lid is closed.)")
+            }
             if now.timeIntervalSince(since) > 20 {
                 return (.orange, "Listening, but no sound from the microphone. Check it's on and unmuted.")
             }

@@ -15,38 +15,70 @@ final class LevelBox: @unchecked Sendable {
 /// speech recogniser wants.
 final class AudioCapture: @unchecked Sendable {
     let level = LevelBox()
-    private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     private var analyzerFormat: AVAudioFormat?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var fileTask: Task<Void, Never>?
+    #if os(macOS)
+    // Mac: AVCaptureSession opens the chosen microphone directly. Pointing AVAudioEngine's
+    // input at a specific device (kAudioOutputUnitProperty_CurrentDevice) stopped working on
+    // macOS 27: its input and output share one audio unit, and the engine got no audio.
+    private var session: AVCaptureSession?
+    private var sink: CaptureSink?
+    private let captureQueue = DispatchQueue(label: "org.churchai.translate.capture")
+    #else
+    private let engine = AVAudioEngine()
+    #endif
 
     /// Start the microphone. Returns the stream of audio for the speech recogniser.
     func startMicrophone(deviceUID: String?, analyzerFormat: AVAudioFormat) throws -> AsyncStream<AnalyzerInput> {
         #if os(macOS)
-        if let deviceUID { AudioDevices.assign(uid: deviceUID, to: engine.inputNode) }
+        let device = deviceUID.flatMap { AVCaptureDevice(uniqueID: $0) } ?? AVCaptureDevice.default(for: .audio)
+        guard let device else { throw CaptureError.noMicrophone }
+        let session = AVCaptureSession()
+        let input: AVCaptureDeviceInput
+        do { input = try AVCaptureDeviceInput(device: device) } catch { throw CaptureError.cantSelect }
+        let output = AVCaptureAudioDataOutput()
+        // 32-bit float, one buffer per channel: the format the meter and converter expect
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsNonInterleaved: true,
+        ]
+        guard session.canAddInput(input), session.canAddOutput(output) else { throw CaptureError.cantSelect }
+        session.addInput(input)
+        session.addOutput(output)
+        let stream = prepare(analyzerFormat: analyzerFormat)
+        let sink = CaptureSink { [weak self] buffer in self?.process(buffer) }
+        output.setSampleBufferDelegate(sink, queue: captureQueue)
+        self.sink = sink
+        self.session = session
+        session.startRunning()
+        print("[mic] \(device.localizedName) (\(device.uniqueID))")
+        return stream
         #else
         try AudioDevices.configureSession()
-        #endif
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
-        let stream = prepare(inputFormat: inFormat, analyzerFormat: analyzerFormat)
+        let stream = prepare(analyzerFormat: analyzerFormat)
         input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
             self?.process(buffer)
         }
         engine.prepare()
         try engine.start()
         return stream
+        #endif
     }
 
     /// Feed a recording through the same path in real time (for comparing with the Python app).
     func startFile(url: URL, analyzerFormat: AVAudioFormat, onFinished: @escaping @Sendable () -> Void) throws -> AsyncStream<AnalyzerInput> {
         let file = try AVAudioFile(forReading: url)
         let fmt = file.processingFormat
-        let stream = prepare(inputFormat: fmt, analyzerFormat: analyzerFormat)
+        let stream = prepare(analyzerFormat: analyzerFormat)
         let chunk = AVAudioFrameCount(fmt.sampleRate / 10) // 100 ms
         fileTask = Task.detached { [weak self] in
             let start = Date()
@@ -81,10 +113,16 @@ final class AudioCapture: @unchecked Sendable {
     func stop() {
         fileTask?.cancel()
         fileTask = nil
+        #if os(macOS)
+        session?.stopRunning()
+        session = nil
+        sink = nil
+        #else
         if engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
+        #endif
         continuation?.finish()
         continuation = nil
         level.set(rms: 0, peak: 0)
@@ -92,9 +130,9 @@ final class AudioCapture: @unchecked Sendable {
 
     // MARK: - Internals
 
-    private func prepare(inputFormat: AVAudioFormat, analyzerFormat: AVAudioFormat) -> AsyncStream<AnalyzerInput> {
+    private func prepare(analyzerFormat: AVAudioFormat) -> AsyncStream<AnalyzerInput> {
         self.analyzerFormat = analyzerFormat
-        converter = AVAudioConverter(from: inputFormat, to: analyzerFormat)
+        converter = nil   // made from the first buffer's format (a microphone's isn't known until it starts)
         let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .unbounded)
         continuation = cont
         return stream
@@ -102,7 +140,11 @@ final class AudioCapture: @unchecked Sendable {
 
     private func process(_ buffer: AVAudioPCMBuffer) {
         measure(buffer)
-        guard let converter, let analyzerFormat, let continuation else { return }
+        guard let analyzerFormat, let continuation else { return }
+        if converter?.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: analyzerFormat)
+        }
+        guard let converter else { return }
         let ratio = analyzerFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 32)
         guard let out = AVAudioPCMBuffer(pcmFormat: analyzerFormat, frameCapacity: capacity) else { return }
@@ -133,9 +175,31 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     enum CaptureError: LocalizedError {
-        case noMicrophone
+        case noMicrophone, cantSelect
         var errorDescription: String? {
-            "No microphone was found. Check the audio interface is plugged in."
+            switch self {
+            case .noMicrophone: "No microphone was found. Check the audio interface is plugged in."
+            case .cantSelect: "Couldn't open the chosen microphone. Unplug it and plug it back in, press Refresh device list, then try again."
+            }
         }
     }
 }
+
+#if os(macOS)
+/// Receives microphone audio from AVCaptureSession and hands it on as PCM buffers.
+private final class CaptureSink: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+    private let handler: (AVAudioPCMBuffer) -> Void
+    init(handler: @escaping (AVAudioPCMBuffer) -> Void) { self.handler = handler }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let asbd = sampleBuffer.formatDescription?.audioStreamBasicDescription,
+              let format = AVAudioFormat(streamDescription: [asbd]) else { return }
+        let frames = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
+        buffer.frameLength = frames
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: buffer.mutableAudioBufferList) == noErr else { return }
+        handler(buffer)
+    }
+}
+#endif

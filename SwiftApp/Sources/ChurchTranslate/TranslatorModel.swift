@@ -64,7 +64,9 @@ final class TranslatorModel {
     private var translator: TranslationSession?
     private var analyzer: SpeechAnalyzer?
     private var resultsTask: Task<Void, Never>?
-    private var meterTimer: Timer?
+    private var meterTask: Task<Void, Never>?
+    /// True once any non-zero sample arrives after Start. A switched-off microphone sends exact zeros.
+    private(set) var heardAnySignal = false
     private var transcriptFile: FileHandle?
     #if os(macOS)
     private var awakeActivity: NSObjectProtocol?
@@ -95,8 +97,14 @@ final class TranslatorModel {
         speaker.fast = fastSpeech
         speaker.preloadPiper()
         refreshDevices()
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tickMeters() }
+        // A main-actor task rather than a Timer + MainActor.assumeIsolated: that executor check
+        // crashed the app (EXC_BAD_ACCESS in swift_task_isMainExecutor) on macOS 27.
+        meterTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let model = self else { return }
+                model.tickMeters()
+            }
         }
     }
 
@@ -297,6 +305,7 @@ final class TranslatorModel {
             let startTime = Date()
             startedAt = startTime
             lastSpeech = nil
+            heardAnySignal = false
             liveEnglish = ""
             openTranscriptFile()
             keepAwake(true)
@@ -414,6 +423,7 @@ final class TranslatorModel {
         waiting = speaker.waiting
         let now = Date()
         if isListening, i.rms >= silenceThreshold { lastSpeech = now }
+        if isListening, i.peak > 0 { heardAnySignal = true }
         if i.peak >= 0.99 { lastClip = now }
         if !isListening, waiting == 0, startedAt == nil, outputLevel > 0 {
             // test-speakers playback finished: let the meter fall
