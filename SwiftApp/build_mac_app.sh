@@ -4,8 +4,10 @@
 set -e
 cd "$( dirname "${BASH_SOURCE[0]}" )"
 
-swift build -c release
-BIN="$(swift build -c release --show-bin-path)/ChurchTranslate"
+# --manifest-cache none: Package.swift checks whether Vendor/ (Piper) exists, but SwiftPM's
+# manifest cache doesn't notice when that changes, so a cached "no Piper" answer could stick.
+swift build -c release --manifest-cache none
+BIN="$(swift build -c release --manifest-cache none --show-bin-path)/ChurchTranslate"
 
 APP="build/Church Translate.app"
 rm -rf "$APP"
