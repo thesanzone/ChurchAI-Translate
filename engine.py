@@ -130,6 +130,12 @@ class TranslatorEngine:
         self._auto_samples = []
         self._auto_until = 0.0
 
+        # Audio dropout recovery (see audio_watchdog)
+        self._input_name = self._output_name = ""
+        self._last_audio_time = time.time()
+        self._recovering = False
+        self._last_recover_attempt = 0.0
+
         # Settings (set in start())
         self.block_size_seconds = 3.0
         self.silence_threshold = 0.003
@@ -337,7 +343,76 @@ class TranslatorEngine:
             raise EngineError(f"Couldn't open the microphone “{input_name}”. ({e})")
 
         self.listening = True
+        self._input_name, self._output_name = input_name, output_name
+        self._last_audio_time = time.time()
+        self._recovering = False
+        self._last_recover_attempt = 0.0
         self._status("listening", f"Listening on {input_name}")
+
+    # ---------------- audio dropout recovery ----------------
+    def seconds_since_audio(self):
+        return time.time() - self._last_audio_time
+
+    def audio_watchdog(self):
+        """Call about once a second while listening. A microphone sends audio continuously
+        (even silence), so none for 3 seconds means the device dropped out (e.g. the USB
+        interface was unplugged). Reopens the audio devices every 2 seconds until audio flows.
+        Returns a message for the volunteer when something changed, else None."""
+        if not self.listening:
+            return None
+        silent_for = self.seconds_since_audio()
+        if silent_for > 3:
+            message = None
+            if not self._recovering:
+                self._recovering = True
+                message = "The microphone stopped sending sound. Reconnecting…"
+                self._log("[!] No audio from the microphone for 3 s; reconnecting")
+            if time.time() - self._last_recover_attempt >= 2:
+                self._last_recover_attempt = time.time()
+                self._reopen_audio()
+            return message
+        if self._recovering and silent_for < 1:
+            self._recovering = False
+            self._log("[+] Microphone audio is flowing again")
+            return "The microphone reconnected. Translation continues."
+        return None
+
+    def _reopen_audio(self):
+        """Close the mic stream, re-scan devices (so a replugged USB interface is found again,
+        possibly under a new number), and reopen the mic and speaker by name."""
+        if self._stream is not None:
+            try:
+                self._stream.abort()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        refresh_devices()
+        in_idx = find_device(self._input_name, "input")
+        out_idx = find_device(self._output_name, "output")
+        if out_idx is not None:
+            self.output_device = out_idx
+        if in_idx is None:
+            self._log("[!] Microphone still not connected; will try again")
+            return
+        try:
+            self._stream = sd.InputStream(
+                device=in_idx, channels=1, samplerate=SAMPLE_RATE,
+                blocksize=METER_BLOCK, callback=self._audio_callback)
+            self._stream.start()
+            self._log(f"[+] Reopened microphone {self._input_name}")
+        except Exception as e:
+            self._stream = None
+            self._log(f"[!] Couldn't reopen the microphone yet: {e}")
+
+    def simulate_dropout(self):
+        """Testing: silently stop the microphone, as a failing USB interface would."""
+        if self._stream is not None:
+            self._stream.abort()
 
     def stop(self):
         self._stop_event.set()
@@ -431,6 +506,7 @@ class TranslatorEngine:
         return round(max(lo, min(hi, db)))
 
     def _audio_callback(self, indata, frames, time_info, status):
+        self._last_audio_time = time.time()
         raw = indata[:, 0]
         if self._auto_until > time.time():
             # Auto level measures the microphone before any gain is applied

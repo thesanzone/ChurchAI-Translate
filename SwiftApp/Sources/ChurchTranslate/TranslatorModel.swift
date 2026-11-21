@@ -34,6 +34,8 @@ final class TranslatorModel {
     }
     var rows: [TranscriptRow] = []
     var liveEnglish = ""                 // words being heard right now (not final yet)
+    /// Phrases kept in the on-screen transcript (the saved transcript file keeps them all).
+    static let maxRowsOnScreen = 200
     /// Words changed or removed by the swear-word filter since launch (the words aren't kept).
     var filteredCount = 0
     /// Swear-word filter loaded from word_filter.txt (shared with the Python app).
@@ -124,6 +126,9 @@ final class TranslatorModel {
         speaker.preloadPiper()
         refreshDevices()
         loadGains()
+        speaker.onRecovery = { [weak self] message in
+            Task { @MainActor in self?.showNotice(message) }
+        }
         // A main-actor task rather than a Timer + MainActor.assumeIsolated: that executor check
         // crashed the app (EXC_BAD_ACCESS in swift_task_isMainExecutor) on macOS 27.
         meterTask = Task { [weak self] in
@@ -374,18 +379,14 @@ final class TranslatorModel {
             return
         }
 
-        let transcriber = makeTranscriber()
-        let analyzer = SpeechAnalyzer(modules: [transcriber],
-                                      options: .init(priority: .userInitiated, modelRetention: .processLifetime))
-        self.analyzer = analyzer
         do {
-            let context = AnalysisContext()
-            context.contextualStrings[.general] = churchVocabulary
-            try await analyzer.setContext(context)
-            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            let probe = makeTranscriber()
+            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [probe]) else {
                 throw SimpleError("No audio format is available for speech recognition.")
             }
-            try await analyzer.prepareToAnalyze(in: format)
+            analyzerFormat = format
+            recognitionRestarts = []
+            stopping = false
 
             try speaker.start(outputDeviceUID: outputUID)
             let stream: AsyncStream<AnalyzerInput>
@@ -397,36 +398,97 @@ final class TranslatorModel {
             } else {
                 stream = try capture.startMicrophone(deviceUID: inputUID, analyzerFormat: format)
             }
-            let startTime = Date()
-            startedAt = startTime
+            startedAt = Date()
             lastSpeech = nil
             heardAnySignal = false
             liveEnglish = ""
             openTranscriptFile()
             keepAwake(true)
             state = .listening
+            if fileURL == nil { startMicWatchdog() }
 
-            resultsTask = Task { [weak self] in
-                do {
-                    for try await result in transcriber.results {
-                        guard let self else { return }
-                        let text = String(result.text.characters).trimmingCharacters(in: .whitespaces)
-                        if result.isFinal {
-                            self.liveEnglish = ""
-                            guard !text.isEmpty else { continue }
-                            let spokenAt = startTime.addingTimeInterval(result.range.end.seconds)
-                            await self.translateAndSpeak(text, spokenAt: spokenAt, using: translator)
-                        } else {
-                            self.liveEnglish = self.filterEnglish(text, mask: "•••").text
-                        }
-                    }
-                } catch {
-                    await MainActor.run { self?.fail("Speech recognition stopped: \(error.localizedDescription)") }
-                }
-            }
-            try await analyzer.start(inputSequence: stream)
+            try await startRecognition(stream: stream, format: format, translator: translator,
+                                       isFile: fileURL != nil)
         } catch {
             fail("Couldn't start: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Speech recognition (restartable)
+
+    private var analyzerFormat: AVAudioFormat?
+    private var recognitionRestarts: [Date] = []
+    /// True while Stop is tearing things down, so the ending recogniser isn't treated as a failure.
+    private var stopping = false
+    /// Testing: make the recogniser fail once after its first sentence (--simulate-recognizer-error).
+    var simulateRecognizerError = false
+
+    /// Start Apple's speech recogniser on `stream`. If it fails during a service it is restarted
+    /// on a fresh stream from the same microphone (see recognitionFailed).
+    private func startRecognition(stream: AsyncStream<AnalyzerInput>, format: AVAudioFormat,
+                                  translator: TranslationSession, isFile: Bool) async throws {
+        let transcriber = makeTranscriber()
+        let analyzer = SpeechAnalyzer(modules: [transcriber],
+                                      options: .init(priority: .userInitiated, modelRetention: .processLifetime))
+        self.analyzer = analyzer
+        let context = AnalysisContext()
+        context.contextualStrings[.general] = churchVocabulary
+        try await analyzer.setContext(context)
+        try await analyzer.prepareToAnalyze(in: format)
+
+        let startTime = Date()
+        resultsTask = Task { [weak self] in
+            do {
+                var finals = 0
+                for try await result in transcriber.results {
+                    guard let self else { return }
+                    let text = String(result.text.characters).trimmingCharacters(in: .whitespaces)
+                    if result.isFinal {
+                        self.liveEnglish = ""
+                        guard !text.isEmpty else { continue }
+                        let spokenAt = startTime.addingTimeInterval(result.range.end.seconds)
+                        await self.translateAndSpeak(text, spokenAt: spokenAt, using: translator)
+                        finals += 1
+                        if self.simulateRecognizerError && finals == 1 {
+                            self.simulateRecognizerError = false
+                            throw SimpleError("simulated recogniser failure (test)")
+                        }
+                    } else {
+                        self.liveEnglish = self.filterEnglish(text, mask: "•••").text
+                    }
+                }
+                // A live microphone stream never ends by itself, so ending here is a failure
+                if !isFile { await self?.recognitionFailed(SimpleError("the recogniser stopped"), translator) }
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.recognitionFailed(error, translator)
+            }
+        }
+        try await analyzer.start(inputSequence: stream)
+    }
+
+    /// Restart speech recognition instead of ending the service, up to 5 times in 10 minutes.
+    private func recognitionFailed(_ error: Error, _ translator: TranslationSession) async {
+        guard isListening, !stopping, let format = analyzerFormat else { return }
+        print("[!] Speech recognition error: \(error.localizedDescription)")
+        let now = Date()
+        recognitionRestarts = recognitionRestarts.filter { now.timeIntervalSince($0) < 600 } + [now]
+        guard recognitionRestarts.count <= 5 else {
+            fail("Speech recognition keeps stopping: \(error.localizedDescription)")
+            return
+        }
+        if let old = analyzer { await old.cancelAndFinishNow() }
+        analyzer = nil
+        liveEnglish = ""
+        do {
+            let stream = capture.newStream(analyzerFormat: format)   // same microphone, fresh stream
+            try await startRecognition(stream: stream, format: format, translator: translator,
+                                       isFile: playingFile != nil)
+            showNotice("Speech recognition had a hiccup and restarted by itself.")
+            print("[recognition] restarted (\(recognitionRestarts.count) in the last 10 minutes)")
+        } catch {
+            fail("Speech recognition stopped: \(error.localizedDescription)")
         }
     }
 
@@ -449,7 +511,7 @@ final class TranslatorModel {
             lastDelay = delay
             let row = TranscriptRow(time: Date(), english: shownEnglish.text,
                                     spanish: spanish.text.isEmpty ? "(filtered)" : spanish.text, delay: delay)
-            rows.append(row)
+            appendRow(row)
             writeTranscript(row)
             print("[EN] \(row.english)\n[ES] \(row.spanish)  (delay \(String(format: "%.1f", delay))s)")
         } catch {
@@ -479,6 +541,21 @@ final class TranslatorModel {
         return (result, masked + cleaned.changed)
     }
 
+    /// Only the latest phrases stay on screen so a 3-hour service doesn't slow the window down;
+    /// the transcript file keeps everything.
+    func appendRow(_ row: TranscriptRow) {
+        rows.append(row)
+        if rows.count > Self.maxRowsOnScreen { rows.removeFirst(rows.count - Self.maxRowsOnScreen) }
+    }
+
+    // MARK: - Test hooks (command-line options only)
+
+    func simulateVoiceStall() { speaker.simulateMissingEndSignal = true }
+    func simulateOutputDropout() { speaker.simulateOutputDropout() }
+    func simulateMicDropout() { capture.simulateMicDropout() }
+    var speakerWaiting: Int { speaker.waiting }
+    var micSecondsSinceAudio: TimeInterval { capture.secondsSinceLastAudio }
+
     private func noteFiltered(_ count: Int) {
         guard count > 0 else { return }
         filteredCount += count
@@ -486,6 +563,8 @@ final class TranslatorModel {
     }
 
     func stop() async {
+        stopping = true
+        stopMicWatchdog()
         capture.stop()
         if let analyzer {
             try? await analyzer.finalizeAndFinishThroughEndOfInput()
@@ -523,6 +602,7 @@ final class TranslatorModel {
     }
 
     private func fail(_ message: String) {
+        stopMicWatchdog()
         capture.stop()
         speaker.stop()
         resultsTask?.cancel()
@@ -577,29 +657,132 @@ final class TranslatorModel {
     // MARK: - Transcripts & sleep
 
     static var transcriptsFolder: URL {
+        // CHURCH_TRANSCRIPTS_DIR lets tests point transcripts somewhere else (e.g. a full disk)
+        if let dir = ProcessInfo.processInfo.environment["CHURCH_TRANSCRIPTS_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir, isDirectory: true)
+        }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("Church Translate Transcripts", isDirectory: true)
     }
 
+    /// Shown to the volunteer when the transcript can't be saved (translation carries on).
+    var transcriptProblem: String?
+
+    /// Short-lived message after the app recovered from a problem by itself (clears after 20 s).
+    var notice: String?
+    private var noticeTask: Task<Void, Never>?
+
+    // MARK: - Microphone dropout recovery
+
+    private var micWatchTask: Task<Void, Never>?
+    private var micDropoutReported = false
+
+    /// While listening to the microphone, check every second that audio is still arriving.
+    /// A microphone sends audio continuously (even silence), so none for 3 seconds means the
+    /// device dropped out; re-open it every 2 seconds until audio flows again. Speech
+    /// recognition keeps running throughout, so nothing else needs restarting.
+    private func startMicWatchdog() {
+        micWatchTask?.cancel()
+        micDropoutReported = false
+        capture.onDropout = { [weak self] reason in
+            Task { @MainActor in
+                guard let self, self.isListening else { return }
+                print("[!] \(reason)")
+                self.micDropoutReported = true
+            }
+        }
+        micWatchTask = Task { @MainActor [weak self] in
+            var recovering = false
+            var lastAttempt = Date.distantPast
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                guard self.isListening, self.capture.usingMicrophone else { continue }
+                let silentFor = self.capture.secondsSinceLastAudio
+                if silentFor > 3 || self.micDropoutReported {
+                    if !recovering {
+                        recovering = true
+                        self.showNotice("The microphone stopped sending sound. Reconnecting…")
+                    }
+                    if Date().timeIntervalSince(lastAttempt) >= 2 {
+                        lastAttempt = Date()
+                        self.micDropoutReported = false
+                        do {
+                            try self.capture.reconnectMicrophone()
+                            print("[mic] reconnect attempt made")
+                        } catch {
+                            print("[!] Microphone not available yet: \(error.localizedDescription)")
+                        }
+                    }
+                } else if recovering, silentFor < 1 {
+                    recovering = false
+                    self.showNotice("The microphone reconnected. Translation continues.")
+                }
+            }
+        }
+    }
+
+    private func stopMicWatchdog() {
+        micWatchTask?.cancel()
+        micWatchTask = nil
+        capture.onDropout = nil
+    }
+
+    func showNotice(_ message: String) {
+        notice = message
+        print("[notice] \(message)")
+        noticeTask?.cancel()
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            if !Task.isCancelled { self?.notice = nil }
+        }
+    }
+
     private func openTranscriptFile() {
+        transcriptProblem = nil
         let folder = Self.transcriptsFolder
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH-mm"
         let url = folder.appendingPathComponent(f.string(from: Date()) + ".txt")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                    throw SimpleError("couldn't create the file")
+                }
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            transcriptFile = handle
+        } catch {
+            transcriptFile = nil
+            transcriptSaveFailed(error)
+            return
         }
-        transcriptFile = try? FileHandle(forWritingTo: url)
-        transcriptFile?.seekToEndOfFile()
-        let header = "Church Translate — \(Date().formatted(date: .complete, time: .shortened))\n\n"
-        transcriptFile?.write(header.data(using: .utf8)!)
+        appendTranscript("Church Translate — \(Date().formatted(date: .complete, time: .shortened))\n\n")
     }
 
     private func writeTranscript(_ row: TranscriptRow) {
         let t = row.time.formatted(date: .omitted, time: .standard)
-        let line = "[\(t)] EN: \(row.english)\n[\(t)] ES: \(row.spanish)\n\n"
-        transcriptFile?.write(line.data(using: .utf8)!)
+        appendTranscript("[\(t)] EN: \(row.english)\n[\(t)] ES: \(row.spanish)\n\n")
+    }
+
+    /// Never lets a full or unwritable disk crash the app: the old FileHandle.write(_:) raised
+    /// an exception that killed the app; write(contentsOf:) reports the error instead.
+    private func appendTranscript(_ text: String) {
+        guard let handle = transcriptFile, let data = text.data(using: .utf8) else { return }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            try? handle.close()
+            transcriptFile = nil      // stop trying; keep translating
+            transcriptSaveFailed(error)
+        }
+    }
+
+    private func transcriptSaveFailed(_ error: Error) {
+        transcriptProblem = "The transcript isn't being saved (the disk may be full). Translation is still running."
+        print("[!] Transcript not saved: \(error.localizedDescription)")
     }
 
     private func closeTranscriptFile() {

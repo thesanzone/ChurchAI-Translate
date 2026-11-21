@@ -42,6 +42,23 @@ Transcripts of every session are saved automatically in
 - **Caption text size**: font size for the projector window.
 - **Start listening as soon as the app is ready**: hands-free start.
 
+### If something goes wrong during a service
+
+Both apps now look after common problems by themselves and show a short orange notice in
+the bottom bar:
+
+- **USB audio interface unplugged or glitching:** the app notices within about 3 seconds,
+  keeps trying to reconnect, and carries on as soon as the device is back. No need to
+  press Stop/Start.
+- **Disk full:** translation keeps running; the notice says the transcript isn't being saved.
+- **Swift app only:** if Apple's speech recognition fails it restarts itself (a second or two
+  of speech may be missed), and a Spanish phrase that gets stuck is skipped after a few
+  seconds so the voice keeps going. Only the latest 200 phrases stay on screen during a
+  long service; the saved transcript keeps everything.
+
+If a problem keeps happening, the app shows a red error instead: fix what it describes,
+then press Start again.
+
 ### Volume faders
 
 Each meter has a fader beside it, like a mixing board:

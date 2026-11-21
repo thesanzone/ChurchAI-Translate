@@ -88,6 +88,20 @@ input and output levels at the end. Launch tests with `open -n -W "build/Church 
 and run one at a time: starting the program file directly, or overlapping test runs,
 can leave a test copy without its window.
 
+### Reliability tests
+
+The app recovers by itself from a stuck voice phrase, speech-recognition errors, audio
+device dropouts and a full disk (see the main README). Each can be simulated:
+
+| Option | Simulates |
+|---|---|
+| `--simulate-voice-stall` | Apple's voice never reports a phrase finished (with `--test-file`) |
+| `--simulate-recognizer-error` | Speech recognition fails after the first sentence (with `--test-file`) |
+| `--simulate-output-dropout` | The speaker output stops 4 s in (with `--test-file`) |
+| `--test-mic 25 --simulate-mic-dropout` | The microphone silently stops 4 s in (uses the real saved mic) |
+| `--rows-selftest` | 450 phrases on screen (checks only 200 are kept) |
+| `CHURCH_TRANSCRIPTS_DIR=<folder>` (environment) | Save transcripts elsewhere, e.g. a full test disk |
+
 ### Swear-word filter
 
 The app uses the same **`../word_filter.txt`** list as the Python app (see the main

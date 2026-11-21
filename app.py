@@ -447,6 +447,9 @@ class MainWindow(QMainWindow):
             w.setStyleSheet("color: gray;")
             bottom.addWidget(w)
             bottom.addSpacing(14)
+        self.notice_label = QLabel("")
+        self.notice_label.setStyleSheet("color: #BA7517;")
+        bottom.addWidget(self.notice_label)
         bottom.addStretch(1)
         cap_btn = QPushButton("Show captions")
         cap_btn.clicked.connect(self.captions.show_on_best_screen)
@@ -609,7 +612,10 @@ class MainWindow(QMainWindow):
         self.out_combo.setEnabled(True)
         self._keep_awake(False)
         if self.transcript_file:
-            self.transcript_file.close()
+            try:
+                self.transcript_file.close()
+            except OSError:
+                pass
             self.transcript_file = None
 
     def test_speakers(self):
@@ -630,12 +636,45 @@ class MainWindow(QMainWindow):
         os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(TRANSCRIPTS_DIR))
 
+    def show_notice(self, message, seconds=20):
+        """Short message in the bottom bar after the app recovered from a problem by itself."""
+        self.notice_label.setText("⚠ " + message)
+        if not hasattr(self, "_notice_timer"):
+            self._notice_timer = QTimer(self, singleShot=True,
+                                        timeout=lambda: self.notice_label.setText(""))
+        self._notice_timer.start(seconds * 1000)
+
     def _open_transcript_file(self):
-        os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
-        path = os.path.join(TRANSCRIPTS_DIR, time.strftime("%Y-%m-%d %H-%M") + ".txt")
-        self.transcript_file = open(path, "a", encoding="utf-8")
-        self.transcript_file.write(f"Church AI Translation — {time.strftime('%A %d %B %Y, %H:%M')}\n\n")
-        self.transcript_file.flush()
+        try:
+            transcripts = os.environ.get("CHURCH_TRANSCRIPTS_DIR") or TRANSCRIPTS_DIR
+            os.makedirs(transcripts, exist_ok=True)
+            path = os.path.join(transcripts, time.strftime("%Y-%m-%d %H-%M") + ".txt")
+            self.transcript_file = open(path, "a", encoding="utf-8")
+        except OSError as e:
+            self.transcript_file = None
+            self._transcript_failed(e)
+            return
+        self._append_transcript(f"Church AI Translation — {time.strftime('%A %d %B %Y, %H:%M')}\n\n")
+
+    def _append_transcript(self, text):
+        """A full or unwritable disk must never stop translation: just stop saving."""
+        if not self.transcript_file:
+            return
+        try:
+            self.transcript_file.write(text)
+            self.transcript_file.flush()
+        except OSError as e:
+            try:
+                self.transcript_file.close()
+            except OSError:
+                pass
+            self.transcript_file = None
+            self._transcript_failed(e)
+
+    def _transcript_failed(self, error):
+        print(f"[!] Transcript not saved: {error}", flush=True)
+        self.show_notice("The transcript isn't being saved (the disk may be full). "
+                         "Translation is still running.", seconds=24 * 3600)
 
     def _keep_awake(self, on):
         """Stop the Mac sleeping (display and system) while translating."""
@@ -697,8 +736,7 @@ class MainWindow(QMainWindow):
         color = "#3B6D11" if latency < 3 else "#BA7517" if latency < 6 else "#A32D2D"
         self.delay_label.setText(f"Delay: <span style='color:{color}'>{latency:.1f}s</span>")
         if self.transcript_file:
-            self.transcript_file.write(f"[{ts}] EN: {en}\n[{ts}] ES: {es}\n\n")
-            self.transcript_file.flush()
+            self._append_transcript(f"[{ts}] EN: {en}\n[{ts}] ES: {es}\n\n")
 
     # ---------------- timers ----------------
     def tick_meters(self):
@@ -711,6 +749,10 @@ class MainWindow(QMainWindow):
 
     def tick_clock(self):
         e = self.engine
+        # Reconnect the microphone/speaker by itself if the audio device drops out
+        msg = e.audio_watchdog()
+        if msg:
+            self.show_notice(msg)
         if self.started_at:
             el = int(time.time() - self.started_at)
             self.clock_label.setText(f"{el // 3600:02d}:{el % 3600 // 60:02d}:{el % 60:02d}")

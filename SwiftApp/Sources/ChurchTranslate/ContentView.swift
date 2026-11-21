@@ -326,6 +326,12 @@ struct ContentView: View {
                 }
                 Text("Waiting: \(model.waiting)")
                 Text("Speech: \(model.fastSpeech ? "fast" : "normal")")
+                if let notice = model.transcriptProblem ?? model.notice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .help(notice)
+                }
             }
             .foregroundStyle(.secondary)
             .font(.callout)

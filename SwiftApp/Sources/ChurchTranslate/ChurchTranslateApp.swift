@@ -99,6 +99,23 @@ struct ChurchTranslateApp: App {
             if let db = number(after: "--input-gain-db") { model.inputGainDB = db }
             if let db = number(after: "--output-gain-db") { model.outputGainDB = db }
         }
+        // Failure simulations for testing recovery (see README)
+        if args.contains("--simulate-recognizer-error") { model.simulateRecognizerError = true }
+        if args.contains("--simulate-voice-stall") { model.simulateVoiceStall() }
+        if args.contains("--simulate-output-dropout") {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(4))
+                print("[test] simulating a speaker output dropout")
+                model.simulateOutputDropout()
+            }
+        }
+        if args.contains("--rows-selftest") {
+            for n in 1...450 {
+                model.appendRow(TranscriptRow(time: Date(), english: "Sentence \(n)", spanish: "Frase \(n)", delay: 0))
+            }
+            print("[rows-selftest] added 450, on screen: \(model.rows.count), first: \(model.rows.first?.english ?? "-"), last: \(model.rows.last?.english ?? "-")")
+            exit(model.rows.count == TranslatorModel.maxRowsOnScreen ? 0 : 1)
+        }
         if let i = args.firstIndex(of: "--test-file"), i + 1 < args.count, model.state == .ready {
             if args.contains("--auto-level") {
                 Task { @MainActor in
@@ -116,6 +133,13 @@ struct ChurchTranslateApp: App {
         // `--test-mic <seconds>`: listen on the saved microphone, report whether sound arrived, then quit.
         if let i = args.firstIndex(of: "--test-mic"), model.state == .ready {
             let seconds = i + 1 < args.count ? Double(args[i + 1]) ?? 5 : 5
+            if args.contains("--simulate-mic-dropout") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(4))
+                    print("[test] simulating a microphone dropout")
+                    model.simulateMicDropout()
+                }
+            }
             Task { @MainActor in
                 var loudest: Float = 0
                 let end = Date().addingTimeInterval(seconds)
@@ -123,7 +147,8 @@ struct ChurchTranslateApp: App {
                     try? await Task.sleep(for: .milliseconds(50))
                     loudest = max(loudest, model.inputPeak)
                 }
-                print("[mic test] state: \(model.state), sound arrived: \(model.heardAnySignal), loudest peak: \(loudest)")
+                print("[mic test] state: \(model.state), sound arrived: \(model.heardAnySignal), loudest peak: \(loudest), "
+                      + String(format: "last audio %.1fs ago", model.micSecondsSinceAudio))
                 exit(model.heardAnySignal ? 0 : 1)
             }
             await model.startMicrophone()

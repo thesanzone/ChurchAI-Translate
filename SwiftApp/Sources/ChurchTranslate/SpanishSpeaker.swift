@@ -22,6 +22,17 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
     private var synthesizing = false
     private var _waiting = 0
     private var started = false
+    /// Increases for every phrase and on Stop, so late callbacks from an old phrase are ignored.
+    private var phraseGeneration = 0
+    /// Testing: pretend Apple's "phrase finished" signal never arrives for the next phrase.
+    var simulateMissingEndSignal = false
+    /// Called (on any thread) when the speaker had to recover, e.g. a stuck phrase was skipped.
+    var onRecovery: ((String) -> Void)?
+    /// Output device chosen at start, used to reconnect after the audio hardware changes.
+    private var outputDeviceUID: String?
+    private var configObserver: NSObjectProtocol?
+    private var startedAt = Date()
+    private var forceRecoveryForTest = false
 
     var voiceIdentifier: String?
     var fast = false
@@ -116,14 +127,78 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         try engine.start()
         player.play()
         started = true
+        self.outputDeviceUID = outputDeviceUID
+        startedAt = Date()
+
+        // If the audio hardware changes (USB interface unplugged/replugged, sample rate change),
+        // macOS stops this engine. Restart it so the Spanish voice doesn't go silent.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            self?.queue.async { self?.recoverOutput(attempt: 1) }
+        }
+    }
+
+    /// Runs on `queue`. Restarts the voice engine after a hardware change, retrying every
+    /// 2 seconds (for up to 2 minutes) until the chosen speaker output is available again.
+    private func recoverOutput(attempt: Int) {
+        guard started else { return }
+        // macOS also sends this notice right after the engine starts; only act if it really stopped
+        if attempt == 1, engine.isRunning, !forceRecoveryForTest { return }
+        forceRecoveryForTest = false
+        let quiet = Date().timeIntervalSince(startedAt) < 5   // settling after Start: don't alarm anyone
+        #if os(macOS)
+        if let uid = outputDeviceUID, AudioDevices.deviceID(forUID: uid) == nil {
+            if attempt == 1 {
+                print("[!] Speaker output disconnected; waiting for it to come back")
+                onRecovery?("The speaker output was disconnected. Waiting for it to be plugged back in…")
+            }
+            if attempt < 60 {
+                queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
+            }
+            return
+        }
+        #endif
+        player.stop()
+        engine.stop()
+        #if os(macOS)
+        if let uid = outputDeviceUID { AudioDevices.assign(uid: uid, to: engine.outputNode) }
+        #endif
+        do {
+            engine.prepare()
+            try engine.start()
+            player.play()
+            // Phrases that were scheduled on the old engine are gone; keep the count honest
+            _waiting = pendingTexts.count + (synthesizing ? 1 : 0)
+            print("[voice] Speaker output restarted after an audio hardware change")
+            if !quiet || attempt > 1 { onRecovery?("The speaker output reconnected.") }
+        } catch {
+            print("[!] Couldn't restart the speaker output (attempt \(attempt)): \(error)")
+            if attempt < 60 {
+                queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
+            }
+        }
+    }
+
+    /// Testing: behave as if macOS reported an audio hardware change.
+    func simulateOutputDropout() {
+        queue.async {
+            self.engine.stop()                 // what macOS does on a real hardware change
+            self.forceRecoveryForTest = true
+            NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: self.engine)
+        }
     }
 
     func stop() {
         queue.sync {
             pendingTexts.removeAll()
             _waiting = 0
+            // Forget any phrase in progress: without this, a phrase whose "finished" signal was
+            // lost would block the voice even after Stop/Start.
+            synthesizing = false
+            phraseGeneration += 1
         }
         synth.stopSpeaking(at: .immediate)
+        if let o = configObserver { NotificationCenter.default.removeObserver(o); configObserver = nil }
         if started {
             player.stop()
             engine.mainMixerNode.removeTap(onBus: 0)
@@ -177,12 +252,34 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         let catchUp = fast || _waiting > 2
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * (catchUp ? 1.15 : 1.0)
 
+        phraseGeneration += 1
+        let generation = phraseGeneration
+        let dropEnd = simulateMissingEndSignal
+        simulateMissingEndSignal = false
+
+        // Watchdog: Apple renders a phrase far faster than real time, so if its "finished"
+        // signal hasn't arrived well after that, skip the phrase instead of blocking the voice
+        // for the rest of the service.
+        let timeout = 10 + Double(text.count) * 0.05
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, self.synthesizing, self.phraseGeneration == generation else { return }
+            print("[!] Spanish voice: a phrase didn't finish after \(Int(timeout))s; skipping it")
+            self.synth.stopSpeaking(at: .immediate)
+            self.phraseGeneration += 1          // ignore anything that phrase sends later
+            self._waiting = max(0, self._waiting - 1)
+            self.synthesizing = false
+            self.onRecovery?("The Spanish voice skipped a phrase that got stuck.")
+            self.synthesizeNextIfIdle()
+        }
+
         var lastScheduled: AVAudioPCMBuffer?
         synth.write(utterance) { [weak self] buffer in
             guard let self else { return }
             guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
+                if dropEnd { return }   // testing the watchdog
                 // End of this phrase: when its last buffer finishes playing, count it done
                 self.queue.async {
+                    guard self.phraseGeneration == generation else { return }   // stale (skipped or stopped)
                     if let last = lastScheduled {
                         self.player.scheduleBuffer(last) {
                             self.queue.async { self._waiting = max(0, self._waiting - 1) }
@@ -197,8 +294,11 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
             }
             guard let converted = self.convert(pcm) else { return }
             // Hold back one buffer so the final one can carry the completion handler
-            if let prev = lastScheduled, self.started { self.player.scheduleBuffer(prev) }
-            lastScheduled = converted
+            self.queue.async {
+                guard self.phraseGeneration == generation else { return }
+                if let prev = lastScheduled, self.started { self.player.scheduleBuffer(prev) }
+                lastScheduled = converted
+            }
         }
     }
 

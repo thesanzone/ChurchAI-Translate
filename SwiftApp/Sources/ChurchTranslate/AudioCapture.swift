@@ -59,9 +59,65 @@ final class AudioCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
     #endif
 
+    // MARK: Dropout detection
+    private let timeLock = NSLock()
+    private var _lastBuffer = Date()
+    private var micDeviceUID: String?
+    private var observers: [NSObjectProtocol] = []
+    /// True while the live microphone (not a recording) is in use.
+    private(set) var usingMicrophone = false
+    /// Called (on any thread) when macOS reports the microphone disconnected or failed.
+    var onDropout: ((String) -> Void)?
+
+    /// Seconds since the last audio arrived from the microphone.
+    var secondsSinceLastAudio: TimeInterval {
+        timeLock.lock(); defer { timeLock.unlock() }; return Date().timeIntervalSince(_lastBuffer)
+    }
+    private func noteAudioArrived() { timeLock.lock(); _lastBuffer = Date(); timeLock.unlock() }
+
     /// Start the microphone. Returns the stream of audio for the speech recogniser.
     func startMicrophone(deviceUID: String?, analyzerFormat: AVAudioFormat) throws -> AsyncStream<AnalyzerInput> {
+        let stream = prepare(analyzerFormat: analyzerFormat)
+        micDeviceUID = deviceUID
+        try openMicrophone()
+        usingMicrophone = true
+        noteAudioArrived()
+        return stream
+    }
+
+    /// Re-open the microphone after a dropout, feeding the SAME stream so speech recognition
+    /// carries on. Throws if the microphone still isn't available.
+    func reconnectMicrophone() throws {
+        closeMicrophone()
+        try openMicrophone()
+        // (secondsSinceLastAudio is NOT reset here: only real audio arriving counts as recovered)
+    }
+
+    /// Testing: silently stop the microphone, as a failing USB interface would.
+    func simulateMicDropout() {
         #if os(macOS)
+        session?.stopRunning()
+        #else
+        engine.stop()
+        #endif
+    }
+
+    private func closeMicrophone() {
+        for o in observers { NotificationCenter.default.removeObserver(o) }
+        observers = []
+        #if os(macOS)
+        session?.stopRunning()
+        session = nil
+        sink = nil
+        #else
+        engine.inputNode.removeTap(onBus: 0)
+        if engine.isRunning { engine.stop() }
+        #endif
+    }
+
+    private func openMicrophone() throws {
+        #if os(macOS)
+        let deviceUID = micDeviceUID
         let device = deviceUID.flatMap { AVCaptureDevice(uniqueID: $0) } ?? AVCaptureDevice.default(for: .audio)
         guard let device else { throw CaptureError.noMicrophone }
         let session = AVCaptureSession()
@@ -78,14 +134,22 @@ final class AudioCapture: @unchecked Sendable {
         guard session.canAddInput(input), session.canAddOutput(output) else { throw CaptureError.cantSelect }
         session.addInput(input)
         session.addOutput(output)
-        let stream = prepare(analyzerFormat: analyzerFormat)
         let sink = CaptureSink { [weak self] buffer in self?.process(buffer) }
         output.setSampleBufferDelegate(sink, queue: captureQueue)
         self.sink = sink
         self.session = session
+        // Hear about it straight away if the microphone is unplugged or the capture fails
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification,
+                                        object: device, queue: nil) { [weak self] _ in
+            self?.onDropout?("The microphone was disconnected.")
+        })
+        observers.append(nc.addObserver(forName: AVCaptureSession.runtimeErrorNotification,
+                                        object: session, queue: nil) { [weak self] _ in
+            self?.onDropout?("The microphone stopped working.")
+        })
         session.startRunning()
         print("[mic] \(device.localizedName) (\(device.uniqueID))")
-        return stream
         #else
         try AudioDevices.configureSession()
         let input = engine.inputNode
@@ -93,13 +157,15 @@ final class AudioCapture: @unchecked Sendable {
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw CaptureError.noMicrophone
         }
-        let stream = prepare(analyzerFormat: analyzerFormat)
         input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
             self?.process(buffer)
         }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            self?.onDropout?("The audio input changed.")
+        })
         engine.prepare()
         try engine.start()
-        return stream
         #endif
     }
 
@@ -135,46 +201,56 @@ final class AudioCapture: @unchecked Sendable {
 
     /// Tell the speech recogniser no more audio is coming (end of a recording).
     func finishInput() {
-        continuation?.finish()
-        continuation = nil
+        streamLock.lock(); let c = continuation; continuation = nil; streamLock.unlock()
+        c?.finish()
+    }
+
+    /// Replace the stream feeding the speech recogniser (used when the recogniser is restarted).
+    /// The microphone keeps running; its audio simply goes to the new stream from now on.
+    func newStream(analyzerFormat: AVAudioFormat) -> AsyncStream<AnalyzerInput> {
+        prepare(analyzerFormat: analyzerFormat)
     }
 
     func stop() {
         fileTask?.cancel()
         fileTask = nil
-        #if os(macOS)
-        session?.stopRunning()
-        session = nil
-        sink = nil
-        #else
-        if engine.isRunning {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        }
-        #endif
-        continuation?.finish()
-        continuation = nil
+        closeMicrophone()
+        usingMicrophone = false
+        finishInput()
         level.set(rms: 0, peak: 0)
     }
 
     // MARK: - Internals
 
+    /// Guards the stream/converter, which the audio thread uses while Stop or a restart replaces them.
+    private let streamLock = NSLock()
+
     private func prepare(analyzerFormat: AVAudioFormat) -> AsyncStream<AnalyzerInput> {
+        // Keep at most 600 buffers (roughly 10-15 s of microphone audio) queued if the recogniser
+        // falls behind, rather than letting memory grow without limit during a long service.
+        let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(600))
+        streamLock.lock()
+        let old = continuation
         self.analyzerFormat = analyzerFormat
         converter = nil   // made from the first buffer's format (a microphone's isn't known until it starts)
-        let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .unbounded)
         continuation = cont
+        streamLock.unlock()
+        old?.finish()
         return stream
     }
 
     private func process(_ input: AVAudioPCMBuffer) {
+        noteAudioArrived()
         if gain.autoActive { gain.addAutoSample(rms(input)) }   // measured before any gain
         let buffer = applyGain(input, gain.linear)
         measure(buffer)
-        guard let analyzerFormat, let continuation else { return }
+        streamLock.lock()
+        guard let analyzerFormat, let continuation else { streamLock.unlock(); return }
         if converter?.inputFormat != buffer.format {
             converter = AVAudioConverter(from: buffer.format, to: analyzerFormat)
         }
+        let converter = self.converter
+        streamLock.unlock()
         guard let converter else { return }
         let ratio = analyzerFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 32)
