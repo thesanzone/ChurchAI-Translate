@@ -75,6 +75,19 @@ download an **Enhanced** or **Premium** one (free):
 
 Then reopen the app and choose the voice in **Settings**.
 
+### Volume faders
+
+The In and Out meters have faders (In −12…+24 dB, Out −24…+12 dB) and an **Auto** button
+that sets the microphone level after listening to 10 seconds of speech. They work the
+same as in the Python app (see the main README) and are saved per device. The Out fader
+takes effect immediately, even mid-sentence.
+
+Test-only options for the recording test (nothing is saved):
+`--input-gain-db N`, `--output-gain-db N`, `--auto-level`. The test prints the loudest
+input and output levels at the end. Launch tests with `open -n -W "build/Church Translate.app" --args …`
+and run one at a time: starting the program file directly, or overlapping test runs,
+can leave a test copy without its window.
+
 ### Swear-word filter
 
 The app uses the same **`../word_filter.txt`** list as the Python app (see the main

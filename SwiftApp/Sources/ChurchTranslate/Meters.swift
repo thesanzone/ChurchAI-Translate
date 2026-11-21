@@ -79,6 +79,64 @@ struct LevelMeter: View {
     }
 }
 
+/// Mixer-style vertical volume fader in dB. Drag (or click) on the track to set it;
+/// double-click resets to 0 dB. Arrow keys / VoiceOver adjust it in 1 dB steps.
+struct GainFader: View {
+    @Binding var db: Double
+    let range: ClosedRange<Double>
+    let help: String
+
+    private let knobHeight: CGFloat = 14
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(db == 0 ? "0 dB" : String(format: "%+.0f dB", db))
+                .font(.caption2.monospacedDigit())
+                .frame(minWidth: 44)
+            GeometryReader { geo in
+                let h = geo.size.height - knobHeight
+                let frac = (db - range.lowerBound) / (range.upperBound - range.lowerBound)
+                let zeroFrac = (0 - range.lowerBound) / (range.upperBound - range.lowerBound)
+                ZStack(alignment: .top) {
+                    // Track
+                    Capsule().fill(.quaternary).frame(width: 6)
+                        .frame(maxHeight: .infinity)
+                    // 0 dB mark
+                    Rectangle().fill(.secondary).frame(width: 18, height: 1)
+                        .offset(y: knobHeight / 2 + h * (1 - zeroFrac))
+                    // Knob
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(.background)
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary))
+                        .overlay(Rectangle().fill(.primary).frame(height: 1.5).padding(.horizontal, 3))
+                        .frame(width: 26, height: knobHeight)
+                        .offset(y: h * (1 - frac))
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                    let y = min(max(g.location.y - knobHeight / 2, 0), h)
+                    let value = range.upperBound - Double(y / max(h, 1)) * (range.upperBound - range.lowerBound)
+                    db = value.rounded()
+                })
+                .simultaneousGesture(TapGesture(count: 2).onEnded { db = 0 })
+            }
+            .frame(width: 30)
+        }
+        .help(help + " Double-click to reset to 0 dB.")
+        .accessibilityElement()
+        .accessibilityLabel(help)
+        .accessibilityValue(String(format: "%+.0f decibels", db))
+        .accessibilityAdjustableAction { dir in
+            switch dir {
+            case .increment: db = min(db + 1, range.upperBound)
+            case .decrement: db = max(db - 1, range.lowerBound)
+            @unknown default: break
+            }
+        }
+    }
+}
+
 /// Small coloured status dot.
 struct Dot: View {
     var color: Color

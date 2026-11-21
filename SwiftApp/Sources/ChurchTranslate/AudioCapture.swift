@@ -10,11 +10,40 @@ final class LevelBox: @unchecked Sendable {
     var value: (rms: Float, peak: Float) { lock.lock(); defer { lock.unlock() }; return (_rms, _peak) }
 }
 
+/// Thread-safe input gain, plus the Auto-level measurement (raw speech loudness samples).
+final class GainBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _linear: Float = 1
+    private var autoUntil = Date.distantPast
+    private var samples: [Float] = []
+    /// Sound quieter than this (before gain) isn't counted as speech for Auto level.
+    var speechFloor: Float = 0.0015
+
+    var linear: Float { lock.lock(); defer { lock.unlock() }; return _linear }
+    func set(db: Double) { lock.lock(); _linear = Float(pow(10, db / 20)); lock.unlock() }
+
+    var autoActive: Bool { lock.lock(); defer { lock.unlock() }; return Date() < autoUntil }
+    func startAuto(seconds: Double) {
+        lock.lock(); samples = []; autoUntil = Date().addingTimeInterval(seconds); lock.unlock()
+    }
+    func addAutoSample(_ rms: Float) {
+        lock.lock(); if rms >= speechFloor { samples.append(rms) }; lock.unlock()
+    }
+    /// 90th-percentile speech loudness from the last measurement, or nil if too little speech.
+    func autoSpeechLevel(minimumSamples: Int) -> Float? {
+        lock.lock(); let s = samples.sorted(); lock.unlock()
+        guard s.count >= minimumSamples else { return nil }
+        return s[Int(Double(s.count) * 0.9)]
+    }
+}
+
 /// Captures audio (from the microphone, or from a recording for testing),
 /// measures its level for the meter, and converts it into the format the
 /// speech recogniser wants.
 final class AudioCapture: @unchecked Sendable {
     let level = LevelBox()
+    /// Input volume fader (applied before the meter and the speech recogniser).
+    let gain = GainBox()
     private var converter: AVAudioConverter?
     private var analyzerFormat: AVAudioFormat?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
@@ -138,7 +167,9 @@ final class AudioCapture: @unchecked Sendable {
         return stream
     }
 
-    private func process(_ buffer: AVAudioPCMBuffer) {
+    private func process(_ input: AVAudioPCMBuffer) {
+        if gain.autoActive { gain.addAutoSample(rms(input)) }   // measured before any gain
+        let buffer = applyGain(input, gain.linear)
         measure(buffer)
         guard let analyzerFormat, let continuation else { return }
         if converter?.inputFormat != buffer.format {
@@ -159,6 +190,31 @@ final class AudioCapture: @unchecked Sendable {
         if error == nil, out.frameLength > 0 {
             continuation.yield(AnalyzerInput(buffer: out))
         }
+    }
+
+    /// Scaled copy of the buffer (clipped to ±1), or the buffer itself at 0 dB.
+    private func applyGain(_ buffer: AVAudioPCMBuffer, _ g: Float) -> AVAudioPCMBuffer {
+        guard g != 1, let src = buffer.floatChannelData,
+              let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
+              let dst = out.floatChannelData else { return buffer }
+        out.frameLength = buffer.frameLength
+        let n = Int(buffer.frameLength)
+        let channels = buffer.format.isInterleaved ? 1 : Int(buffer.format.channelCount)
+        let samplesPerChannel = buffer.format.isInterleaved ? n * Int(buffer.format.channelCount) : n
+        for c in 0..<channels {
+            for i in 0..<samplesPerChannel {
+                dst[c][i] = max(-1, min(1, src[c][i] * g))
+            }
+        }
+        return out
+    }
+
+    private func rms(_ buffer: AVAudioPCMBuffer) -> Float {
+        let n = Int(buffer.frameLength)
+        guard n > 0, let ch = buffer.floatChannelData?[0] else { return 0 }
+        var sum: Float = 0
+        for i in 0..<n { sum += ch[i] * ch[i] }
+        return (sum / Float(n)).squareRoot()
     }
 
     private func measure(_ buffer: AVAudioPCMBuffer) {

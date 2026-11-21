@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QSlider, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 import engine as eng
@@ -86,6 +86,52 @@ class LevelMeter(QWidget):
             p.setPen(pen)
             p.drawLine(r.left() - 1, int(y), r.right() + 1, int(y))
         p.end()
+
+
+class _ResetSlider(QSlider):
+    """Vertical slider that jumps back to 0 dB on double-click."""
+
+    def mouseDoubleClickEvent(self, event):
+        self.setValue(0)
+
+
+class GainFader(QWidget):
+    """Mixer-style volume fader in dB, with the current value shown above it."""
+
+    def __init__(self, low_db, high_db, tooltip, on_change):
+        super().__init__()
+        self._on_change = on_change
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.label = QLabel("0 dB")
+        self.label.setAlignment(Qt.AlignHCenter)
+        self.label.setStyleSheet("font-size: 11px;")
+        self.label.setMinimumWidth(44)
+        self.slider = _ResetSlider(Qt.Vertical)
+        self.slider.setRange(int(low_db), int(high_db))
+        self.slider.setValue(0)
+        self.slider.setPageStep(3)
+        self.slider.setTickPosition(QSlider.TicksRight)
+        self.slider.setTickInterval(6)
+        self.slider.setToolTip(tooltip + "\nDouble-click to reset to 0 dB.")
+        self.slider.valueChanged.connect(self._changed)
+        lay.addWidget(self.label)
+        lay.addWidget(self.slider, 1, alignment=Qt.AlignHCenter)
+
+    def _changed(self, value):
+        self._show(value)
+        self._on_change(float(value))
+
+    def _show(self, value):
+        self.label.setText("0 dB" if value == 0 else f"{value:+d} dB")
+
+    def set_db(self, db):
+        """Move the fader without triggering on_change (used when loading saved settings)."""
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(round(db)))
+        self.slider.blockSignals(False)
+        self._show(self.slider.value())
 
 
 class Dot(QLabel):
@@ -299,7 +345,7 @@ class MainWindow(QMainWindow):
         mid.setSpacing(0)
 
         left = QWidget()
-        left.setFixedWidth(250)
+        left.setFixedWidth(330)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(16, 14, 16, 14)
         lv.addWidget(self._caption("Microphone (English in)"))
@@ -317,6 +363,7 @@ class MainWindow(QMainWindow):
         lv.addSpacing(10)
 
         meters = QHBoxLayout()
+        meters.setSpacing(6)
         in_col = QVBoxLayout()
         self.clip_dot = Dot(10)
         self.clip_dot.setToolTip("Turns red if the microphone is too loud (clipping)")
@@ -325,15 +372,35 @@ class MainWindow(QMainWindow):
         in_col.addWidget(self.in_meter, 1, alignment=Qt.AlignHCenter)
         in_col.addWidget(QLabel("In"), alignment=Qt.AlignHCenter)
         meters.addLayout(in_col)
+        in_fader_col = QVBoxLayout()
+        lo, hi = eng.TranslatorEngine.INPUT_GAIN_RANGE
+        self.in_fader = GainFader(lo, hi, "Microphone level going to the translator.",
+                                  self.input_gain_changed)
+        in_fader_col.addWidget(self.in_fader, 1)
+        self.auto_btn = QPushButton("Auto")
+        self.auto_btn.setToolTip("While the pastor is speaking, listens for 10 seconds\n"
+                                 "and sets the microphone level automatically.")
+        self.auto_btn.setFixedWidth(52)
+        self.auto_btn.clicked.connect(self.start_auto_level)
+        in_fader_col.addWidget(self.auto_btn, alignment=Qt.AlignHCenter)
+        meters.addLayout(in_fader_col)
+        meters.addSpacing(6)
         out_col = QVBoxLayout()
         out_col.addSpacing(14)
         self.out_meter = LevelMeter()
         out_col.addWidget(self.out_meter, 1, alignment=Qt.AlignHCenter)
         out_col.addWidget(QLabel("Out"), alignment=Qt.AlignHCenter)
         meters.addLayout(out_col)
+        lo, hi = eng.TranslatorEngine.OUTPUT_GAIN_RANGE
+        self.out_fader = GainFader(lo, hi, "Volume of the Spanish voice.",
+                                   self.output_gain_changed)
+        out_fader_col = QVBoxLayout()
+        out_fader_col.addWidget(self.out_fader, 1)
+        out_fader_col.addSpacing(self.auto_btn.sizeHint().height())
+        meters.addLayout(out_fader_col)
         info = QVBoxLayout()
         info.addStretch(1)
-        legend = QLabel("- - -  silence cutoff\nSound below the line\nis not translated.")
+        legend = QLabel("- - -  silence\ncutoff. Sound\nbelow it is not\ntranslated.")
         legend.setStyleSheet("color: gray; font-size: 11px;")
         info.addWidget(legend)
         info.addSpacing(10)
@@ -447,6 +514,71 @@ class MainWindow(QMainWindow):
         self.settings.input_device_name = self.in_combo.currentData() or ""
         self.settings.output_device_name = self.out_combo.currentData() or ""
         save_settings(self.settings)
+        self.load_gains()
+
+    # ---------------- volume faders ----------------
+    def load_gains(self):
+        """Apply the saved fader settings for the selected devices."""
+        s = self.settings
+        self.engine.set_input_gain_db(s.input_gain_db())
+        self.engine.set_output_gain_db(s.output_gain_db())
+        self.in_fader.set_db(self.engine.input_gain_db)
+        self.out_fader.set_db(self.engine.output_gain_db)
+
+    def input_gain_changed(self, db):
+        self.engine.set_input_gain_db(db)
+        self.settings.set_input_gain_db(db)
+        self._save_soon()
+
+    def output_gain_changed(self, db):
+        self.engine.set_output_gain_db(db)
+        self.settings.set_output_gain_db(db)
+        self._save_soon()
+
+    def _save_soon(self):
+        # Save once the volunteer stops moving the fader, not on every step
+        if not hasattr(self, "_save_timer"):
+            self._save_timer = QTimer(self, singleShot=True, interval=600,
+                                      timeout=lambda: save_settings(self.settings))
+        self._save_timer.start()
+
+    def start_auto_level(self):
+        if not self.engine.listening:
+            QMessageBox.information(
+                self, "Auto level",
+                "Press Start first. Then click Auto while the pastor (or someone at the "
+                "pulpit microphone) is speaking normally.")
+            return
+        self.engine.start_auto_level()
+        self.auto_btn.setEnabled(False)
+        self._auto_left = int(self.engine.AUTO_SECONDS)
+        self.auto_btn.setText(f"{self._auto_left}s")
+        self._auto_timer = QTimer(self, interval=1000, timeout=self._auto_tick)
+        self._auto_timer.start()
+
+    def _auto_tick(self):
+        self._auto_left -= 1
+        if self._auto_left > 0 and self.engine.listening:
+            self.auto_btn.setText(f"{self._auto_left}s")
+            return
+        self._auto_timer.stop()
+        self.auto_btn.setText("Auto")
+        self.auto_btn.setEnabled(True)
+        db = self.engine.auto_level_result()
+        if db is None:
+            QMessageBox.information(
+                self, "Auto level",
+                "Not enough speech was heard to set the level. Try again while someone "
+                "is speaking into the microphone.")
+            return
+        self.in_fader.set_db(db)
+        self.input_gain_changed(float(db))
+        lo, hi = self.engine.INPUT_GAIN_RANGE
+        if db >= hi:
+            QMessageBox.information(
+                self, "Auto level",
+                f"The microphone is very quiet, so the level is at the maximum (+{int(hi)} dB). "
+                "Turning up the mixer or audio interface will give a cleaner sound.")
 
     # ---------------- actions ----------------
     def toggle_listening(self):

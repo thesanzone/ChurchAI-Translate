@@ -89,7 +89,23 @@ struct ChurchTranslateApp: App {
         await model.prepare()
         print("[voice] \(model.currentVoiceName) — \(model.voiceID ?? "none")")
         let args = ProcessInfo.processInfo.arguments
+        // Test-only fader settings (not saved): --input-gain-db N, --output-gain-db N, --auto-level
+        func number(after flag: String) -> Double? {
+            guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+            return Double(args[i + 1])
+        }
+        if args.contains("--test-file") {
+            model.saveGainsEnabled = false
+            if let db = number(after: "--input-gain-db") { model.inputGainDB = db }
+            if let db = number(after: "--output-gain-db") { model.outputGainDB = db }
+        }
         if let i = args.firstIndex(of: "--test-file"), i + 1 < args.count, model.state == .ready {
+            if args.contains("--auto-level") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    model.startAutoLevel()
+                }
+            }
             if args.contains("--quit-when-done") {
                 NotificationCenter.default.addObserver(forName: .recordingFinished, object: nil, queue: .main) { _ in
                     exit(0)

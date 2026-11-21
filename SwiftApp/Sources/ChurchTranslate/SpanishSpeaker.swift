@@ -8,6 +8,13 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
     private let synth = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    /// Output volume fader: a gain stage between the voice and the speakers (changes apply instantly).
+    private let gainNode = AVAudioUnitEQ(numberOfBands: 0)
+
+    /// Spanish voice volume in dB (the Out fader). Range -24…+12.
+    var outputGainDB: Float = 0 {
+        didSet { gainNode.globalGain = max(-24, min(12, outputGainDB)) }
+    }
     private let playFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
     private var converters: [String: AVAudioConverter] = [:]
     private let queue = DispatchQueue(label: "SpanishSpeaker")
@@ -85,7 +92,10 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
     func start(outputDeviceUID: String?) throws {
         if started { return }
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+        engine.attach(gainNode)
+        gainNode.globalGain = max(-24, min(12, outputGainDB))
+        engine.connect(player, to: gainNode, format: playFormat)
+        engine.connect(gainNode, to: engine.mainMixerNode, format: playFormat)
         #if os(macOS)
         if let outputDeviceUID { AudioDevices.assign(uid: outputDeviceUID, to: engine.outputNode) }
         #else
@@ -119,6 +129,7 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
             engine.mainMixerNode.removeTap(onBus: 0)
             engine.stop()
             engine.detach(player)
+            engine.detach(gainNode)
             started = false
         }
         level.set(rms: 0, peak: 0)

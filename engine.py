@@ -6,6 +6,7 @@ reorganised into a class so the desktop window can start, stop and
 monitor it. The engine has no GUI code; it reports back through callbacks.
 """
 import json
+import math
 import os
 import queue
 import shutil
@@ -119,6 +120,15 @@ class TranslatorEngine:
         self.last_delay = 0.0
         self._play_start = 0.0
         self._play_env = None
+
+        # Volume faders (dB). Input gain is applied before the meter and the translator;
+        # output gain is applied to the Spanish voice as each phrase starts playing.
+        self.input_gain_db = 0.0
+        self.output_gain_db = 0.0
+        self._input_gain = 1.0
+        self._output_gain = 1.0
+        self._auto_samples = []
+        self._auto_until = 0.0
 
         # Settings (set in start())
         self.block_size_seconds = 3.0
@@ -381,8 +391,54 @@ class TranslatorEngine:
         return self._audio_queue.qsize() + self._playback_queue.qsize()
 
     # ---------------- audio pipeline ----------------
+    # ---------------- volume (gain) controls ----------------
+    INPUT_GAIN_RANGE = (-12.0, 24.0)    # dB
+    OUTPUT_GAIN_RANGE = (-24.0, 12.0)   # dB
+    AUTO_TARGET_RMS = 0.1               # about -20 dBFS: a healthy speech level
+    AUTO_SECONDS = 10.0
+
+    def set_input_gain_db(self, db):
+        lo, hi = self.INPUT_GAIN_RANGE
+        self.input_gain_db = max(lo, min(hi, float(db)))
+        self._input_gain = 10 ** (self.input_gain_db / 20)
+
+    def set_output_gain_db(self, db):
+        lo, hi = self.OUTPUT_GAIN_RANGE
+        self.output_gain_db = max(lo, min(hi, float(db)))
+        self._output_gain = 10 ** (self.output_gain_db / 20)
+
+    def start_auto_level(self):
+        """Measure the microphone for AUTO_SECONDS while listening; see auto_level_result()."""
+        with self._lock:
+            self._auto_samples = []
+            self._auto_until = time.time() + self.AUTO_SECONDS
+
+    @property
+    def auto_level_running(self):
+        return self._auto_until > time.time()
+
+    def auto_level_result(self):
+        """Suggested input gain (dB) from the last measurement, or None if no speech was heard."""
+        with self._lock:
+            samples = sorted(self._auto_samples)
+        if len(samples) < 20:          # under ~1 s of speech
+            return None
+        speech = samples[int(len(samples) * 0.9)]   # 90th percentile of speech loudness
+        if speech <= 0:
+            return None
+        db = 20 * math.log10(self.AUTO_TARGET_RMS / speech)
+        lo, hi = self.INPUT_GAIN_RANGE
+        return round(max(lo, min(hi, db)))
+
     def _audio_callback(self, indata, frames, time_info, status):
-        mono = indata[:, 0]
+        raw = indata[:, 0]
+        if self._auto_until > time.time():
+            # Auto level measures the microphone before any gain is applied
+            raw_rms = float(np.sqrt(np.mean(raw ** 2)))
+            if raw_rms >= self.silence_threshold / max(self._input_gain, 1e-6) * 0.5:
+                with self._lock:
+                    self._auto_samples.append(raw_rms)
+        mono = raw if self._input_gain == 1.0 else np.clip(raw * self._input_gain, -1.0, 1.0)
         self.input_rms = float(np.sqrt(np.mean(mono ** 2)))
         self.input_peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
         now = time.time()
@@ -498,6 +554,11 @@ class TranslatorEngine:
         while True:
             stereo, env = self._playback_queue.get()
             try:
+                gain = self._output_gain
+                if gain != 1.0:
+                    stereo = np.clip(stereo * gain, -1.0, 1.0)
+                    if env is not None:
+                        env = np.minimum(env * gain, 1.0)
                 self._play_env, self._play_start = env, time.time()
                 sd.play(stereo, samplerate=OUTPUT_RATE, device=self.output_device)
                 sd.wait()

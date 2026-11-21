@@ -42,6 +42,21 @@ Transcripts of every session are saved automatically in
 - **Caption text size**: font size for the projector window.
 - **Start listening as soon as the app is ready**: hands-free start.
 
+### Volume faders
+
+Each meter has a fader beside it, like a mixing board:
+
+- **In fader** (−12 to +24 dB): how loud the microphone is to the translator. Watch the
+  In meter while the pastor speaks and set the fader so speech sits well above the
+  dashed silence line, without the clip light turning red.
+- **Auto** (under the In fader): press it *while someone is speaking*. It listens for
+  10 seconds and sets the In fader for you.
+- **Out fader** (−24 to +12 dB): volume of the Spanish voice.
+- Double-click a fader to reset it to 0 dB. Settings are remembered for each microphone
+  and speaker. These faders only affect this app, not the Mac's system volume.
+- If the pastor is very quiet, turning up the mixer or audio interface gives a cleaner
+  sound than a big boost here (boosting also boosts background hiss).
+
 ### Swear-word filter
 
 Both apps (Python and Swift) check every phrase against **`word_filter.txt`** before

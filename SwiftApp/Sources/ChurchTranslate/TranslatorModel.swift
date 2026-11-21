@@ -52,8 +52,30 @@ final class TranslatorModel {
     var voices: [AVSpeechSynthesisVoice] = []
 
     // MARK: Settings (remembered between launches)
-    var inputUID: String? { didSet { defaults.set(inputUID, forKey: "inputUID") } }
-    var outputUID: String? { didSet { defaults.set(outputUID, forKey: "outputUID") } }
+    var inputUID: String? { didSet { defaults.set(inputUID, forKey: "inputUID"); loadGains() } }
+    var outputUID: String? { didSet { defaults.set(outputUID, forKey: "outputUID"); loadGains() } }
+
+    // MARK: Volume faders (dB), remembered per device
+    static let inputGainRange: ClosedRange<Double> = -12...24
+    static let outputGainRange: ClosedRange<Double> = -24...12
+    /// Microphone level going to the translator (applied before the meter and recogniser).
+    var inputGainDB: Double = 0 {
+        didSet {
+            capture.gain.set(db: inputGainDB)
+            saveGain(inputGainDB, key: "inputGains", device: inputUID)
+        }
+    }
+    /// Spanish voice volume.
+    var outputGainDB: Double = 0 {
+        didSet {
+            speaker.outputGainDB = Float(outputGainDB)
+            saveGain(outputGainDB, key: "outputGains", device: outputUID)
+        }
+    }
+    /// Seconds left while Auto level is listening (nil when not running).
+    var autoLevelSecondsLeft: Int?
+    /// Message to show the volunteer after Auto level (nil when none).
+    var autoLevelMessage: String?
     var voiceID: String? { didSet { defaults.set(voiceID, forKey: "voiceID"); speaker.voiceIdentifier = voiceID } }
     var fastSpeech: Bool { didSet { defaults.set(fastSpeech, forKey: "fastSpeech"); speaker.fast = fastSpeech } }
     var captionSize: Double { didSet { defaults.set(captionSize, forKey: "captionSize") } }
@@ -101,6 +123,7 @@ final class TranslatorModel {
         speaker.fast = fastSpeech
         speaker.preloadPiper()
         refreshDevices()
+        loadGains()
         // A main-actor task rather than a Timer + MainActor.assumeIsolated: that executor check
         // crashed the app (EXC_BAD_ACCESS in swift_task_isMainExecutor) on macOS 27.
         meterTask = Task { [weak self] in
@@ -109,6 +132,65 @@ final class TranslatorModel {
                 guard let model = self else { return }
                 model.tickMeters()
             }
+        }
+    }
+
+    // MARK: - Volume faders
+
+    /// Apply the saved fader settings for the selected devices.
+    func loadGains() {
+        let ins = defaults.dictionary(forKey: "inputGains") as? [String: Double] ?? [:]
+        let outs = defaults.dictionary(forKey: "outputGains") as? [String: Double] ?? [:]
+        let i = ins[inputUID ?? "default"] ?? 0
+        let o = outs[outputUID ?? "default"] ?? 0
+        if inputGainDB != i { inputGainDB = i } else { capture.gain.set(db: i) }
+        if outputGainDB != o { outputGainDB = o } else { speaker.outputGainDB = Float(o) }
+    }
+
+    private func saveGain(_ db: Double, key: String, device: String?) {
+        guard saveGainsEnabled else { return }
+        var all = defaults.dictionary(forKey: key) as? [String: Double] ?? [:]
+        all[device ?? "default"] = (db * 10).rounded() / 10
+        defaults.set(all, forKey: key)
+    }
+
+    /// Listen for 10 seconds while someone speaks, then set the microphone level so
+    /// normal speech sits around -20 dBFS (well above the quiet line, well below clipping).
+    func startAutoLevel() {
+        guard isListening else {
+            autoLevelMessage = "Press Start first. Then click Auto while the pastor (or someone at the pulpit microphone) is speaking normally."
+            return
+        }
+        guard autoLevelSecondsLeft == nil else { return }
+        let seconds = 10
+        capture.gain.speechFloor = silenceThreshold / max(capture.gain.linear, 0.000_1) * 0.5
+        capture.gain.startAuto(seconds: Double(seconds))
+        autoLevelSecondsLeft = seconds
+        Task { @MainActor [weak self] in
+            for left in stride(from: seconds - 1, through: 0, by: -1) {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                if !self.isListening { break }
+                self.autoLevelSecondsLeft = left > 0 ? left : nil
+            }
+            self?.finishAutoLevel()
+        }
+    }
+
+    private func finishAutoLevel() {
+        autoLevelSecondsLeft = nil
+        // 20 samples ≈ 1 second of speech (the microphone tap delivers ~20 buffers a second)
+        guard let speech = capture.gain.autoSpeechLevel(minimumSamples: 20), speech > 0 else {
+            autoLevelMessage = "Not enough speech was heard to set the level. Try again while someone is speaking into the microphone."
+            return
+        }
+        let target: Float = 0.1   // about -20 dBFS
+        let db = (20 * log10(Double(target / speech))).rounded()
+        let clamped = min(max(db, Self.inputGainRange.lowerBound), Self.inputGainRange.upperBound)
+        inputGainDB = clamped
+        print("[auto level] speech level \(speech) -> input \(clamped) dB")
+        if clamped >= Self.inputGainRange.upperBound {
+            autoLevelMessage = "The microphone is very quiet, so the level is at the maximum (+\(Int(clamped)) dB). Turning up the mixer or audio interface will give a cleaner sound."
         }
     }
 
@@ -433,6 +515,8 @@ final class TranslatorModel {
             try? await Task.sleep(nanoseconds: 250_000_000)
             waited += 1
         }
+        print(String(format: "[levels] input gain %+.0f dB, loudest input RMS %.4f; output gain %+.0f dB, loudest output RMS %.4f",
+                     inputGainDB, loudestInputRMS, outputGainDB, loudestOutputRMS))
         print("[done] Finished playing recording")
         await stop()
         NotificationCenter.default.post(name: .recordingFinished, object: nil)
@@ -478,10 +562,17 @@ final class TranslatorModel {
         if isListening, i.rms >= silenceThreshold { lastSpeech = now }
         if isListening, i.peak > 0 { heardAnySignal = true }
         if i.peak >= 0.99 { lastClip = now }
-        if !isListening, waiting == 0, startedAt == nil, outputLevel > 0 {
-            // test-speakers playback finished: let the meter fall
+        if isListening {
+            loudestInputRMS = max(loudestInputRMS, i.rms)
+            loudestOutputRMS = max(loudestOutputRMS, outputLevel)
         }
     }
+
+    /// Loudest meter readings during the current run (printed by the recording test).
+    private(set) var loudestInputRMS: Float = 0
+    private(set) var loudestOutputRMS: Float = 0
+    /// False during command-line tests so test fader values aren't saved.
+    var saveGainsEnabled = true
 
     // MARK: - Transcripts & sleep
 

@@ -25,7 +25,7 @@ struct ContentView: View {
             Divider()
             HStack(spacing: 0) {
                 leftPanel
-                    .frame(width: 250)
+                    .frame(width: 330)
                 Divider()
                 transcript
             }
@@ -39,6 +39,13 @@ struct ContentView: View {
         .windowDismissBehavior(model.isListening ? .disabled : .automatic)
         #endif
         .sheet(isPresented: $ui.showSettings) { SettingsView() }
+        .alert("Auto level", isPresented: Binding(
+            get: { model.autoLevelMessage != nil },
+            set: { if !$0 { model.autoLevelMessage = nil } })) {
+            Button("OK") { model.autoLevelMessage = nil }
+        } message: {
+            Text(model.autoLevelMessage ?? "")
+        }
         #if os(iOS)
         .fullScreenCover(isPresented: $ui.showCaptions) {
             CaptionView(onClose: { ui.showCaptions = false })
@@ -180,7 +187,7 @@ struct ContentView: View {
             Button("Refresh") { model.refreshDevices() }
             #endif
 
-            HStack(alignment: .bottom, spacing: 16) {
+            HStack(alignment: .bottom, spacing: 8) {
                 VStack(spacing: 4) {
                     TimelineView(.periodic(from: .now, by: 0.25)) { ctx in
                         let clipping = model.lastClip.map { ctx.date.timeIntervalSince($0) < 1 } ?? false
@@ -192,13 +199,30 @@ struct ContentView: View {
                     Text("In").font(.caption)
                 }
                 VStack(spacing: 4) {
+                    GainFader(db: $model.inputGainDB, range: TranslatorModel.inputGainRange,
+                              help: "Microphone level going to the translator.")
+                    Button(model.autoLevelSecondsLeft.map { "\($0)s" } ?? "Auto") { model.startAutoLevel() }
+                        .controlSize(.small)
+                        .disabled(model.autoLevelSecondsLeft != nil)
+                        .help("While the pastor is speaking, listens for 10 seconds and sets the microphone level automatically.")
+                }
+                .frame(width: 52)
+                VStack(spacing: 4) {
                     Spacer().frame(height: 14)
                     LevelMeter(level: meterFraction(model.outputLevel))
                     Text("Out").font(.caption)
                 }
+                .padding(.leading, 6)
+                VStack(spacing: 4) {
+                    GainFader(db: $model.outputGainDB, range: TranslatorModel.outputGainRange,
+                              help: "Volume of the Spanish voice.")
+                    // Keeps the fader the same height as the input one (which has the Auto button)
+                    Button("Auto") {}.controlSize(.small).hidden()
+                }
+                .frame(width: 52)
                 VStack(alignment: .leading, spacing: 6) {
                     Spacer()
-                    Text("- - -  quiet line\nSound below it is\ntreated as silence.")
+                    Text("- - -  quiet\nline. Sound\nbelow it is\ntreated as\nsilence.")
                         .font(.caption2).foregroundStyle(.secondary)
                     caption("Speech heard")
                     TimelineView(.periodic(from: .now, by: 0.5)) { ctx in

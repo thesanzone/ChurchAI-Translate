@@ -7,7 +7,7 @@ when USB devices are plugged in a different order.
 """
 import configparser
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 USER_DIR = os.path.expanduser("~/ChurchAI")
@@ -31,6 +31,26 @@ class Settings:
     auto_start: bool = False
     # Caption window font size in points
     caption_font_size: int = 54
+    # Volume fader settings in dB, remembered per device (key: lowercase device name)
+    input_gains: dict = field(default_factory=dict)
+    output_gains: dict = field(default_factory=dict)
+
+    def input_gain_db(self):
+        return self.input_gains.get(gain_key(self.input_device_name), 0.0)
+
+    def output_gain_db(self):
+        return self.output_gains.get(gain_key(self.output_device_name), 0.0)
+
+    def set_input_gain_db(self, db):
+        self.input_gains[gain_key(self.input_device_name)] = round(float(db), 1)
+
+    def set_output_gain_db(self, db):
+        self.output_gains[gain_key(self.output_device_name)] = round(float(db), 1)
+
+
+def gain_key(device_name):
+    """Config-file-safe key for a device name (configparser can't have = or : in keys)."""
+    return device_name.lower().replace("=", "_").replace(":", "_").strip() or "default"
 
 
 def load_settings() -> Settings:
@@ -55,6 +75,13 @@ def load_settings() -> Settings:
         pass
     s.speech_speed = g.get("speech_speed", s.speech_speed)
     s.auto_start = str(g.get("auto_start", s.auto_start)).lower() in ("1", "true", "yes")
+    for section, target in (("INPUT_GAIN", s.input_gains), ("OUTPUT_GAIN", s.output_gains)):
+        if cfg.has_section(section):
+            for name, value in cfg[section].items():
+                try:
+                    target[name] = float(value)
+                except ValueError:
+                    pass
     return s
 
 
@@ -82,5 +109,7 @@ def save_settings(s: Settings) -> None:
     cfg["APP"]["speech_speed"] = d["speech_speed"]
     cfg["APP"]["auto_start"] = str(d["auto_start"])
     cfg["APP"]["caption_font_size"] = str(d["caption_font_size"])
+    for section, values in (("INPUT_GAIN", s.input_gains), ("OUTPUT_GAIN", s.output_gains)):
+        cfg[section] = {name: f"{db:g}" for name, db in values.items()}
     with open(USER_CONFIG, "w") as f:
         cfg.write(f)
