@@ -1,0 +1,194 @@
+# ============================================================================
+#  Church AI Translation — word filter
+#  Used by BOTH apps (Python and Swift). Edit this file to add or remove words.
+#  After editing: restart the Python app; for the Swift app, rebuild it.
+#
+#  How it works:
+#   - Matching ignores capital letters and accents (cabrón = cabron = CABRON).
+#   - Only whole words match ("escoger" is NOT affected by "coger").
+#   - A * at the end matches any ending:  fuck*  also matches fucking, fucked…
+#   - [block]   Never spoken, never shown in captions, never saved.
+#               English words show as ••• in the volunteer panel.
+#               Spanish words are dropped from the voice and captions.
+#               Words here are also blocked inside the translation model itself
+#               (Python app), so it chooses a different word instead.
+#   - [replace] Swap a risky word for a safe one:   risky => safe
+#               Mainly Spain-Spanish words that are vulgar in Latin America.
+#   - [allow]   Never filtered, even if they match a [block] pattern.
+#               Bible and sermon words like "hell" belong here.
+#  Lines starting with # are notes and are ignored.
+# ============================================================================
+
+[allow]
+# Sermon and Bible words a generic filter would wrongly censor
+hell
+hells
+damn
+damned
+damnation
+damnable
+ass
+asses
+bastard
+bastards
+cock
+cockcrow
+pisseth
+whore
+whores
+whoredom
+whoredoms
+whoremonger
+whoremongers
+harlot
+pricks
+zorra
+zorras
+perro
+perros
+infierno
+condenacion
+condenado
+condenados
+maldito
+maldita
+malditos
+malditas
+maldicion
+diablo
+demonio
+demonios
+asno
+burro
+coja
+cojo
+escoger
+recoger
+
+[replace]
+# KJV "shittim wood" is acacia; left alone the model has produced a swear word for it
+shittim => acacia
+shittem => acacia
+shitim => acacia
+shitem => acacia
+shittum => acacia
+
+# "coger" means "take/catch" in Spain but is vulgar in Mexico and most of Latin America
+coger => tomar
+coge => toma
+coges => tomas
+cogen => toman
+cogemos => tomamos
+cogio => tomó
+cogi => tomé
+cogieron => tomaron
+cogido => tomado
+cogida => tomada
+cogidos => tomados
+cogiendo => tomando
+cogera => tomará
+cogeran => tomarán
+cogeremos => tomaremos
+cogeria => tomaría
+cojan => tomen
+cojamos => tomemos
+cogedlo => tomadlo
+cogelo => tómalo
+cogela => tómala
+cogelos => tómalos
+cogerlo => tomarlo
+cogerla => tomarla
+
+[block]
+# --- English ---
+fuck*
+motherfuck*
+shit
+shits
+shitty
+shitting
+bullshit
+horseshit
+asshole*
+arsehole*
+bitch*
+cunt*
+dickhead*
+goddamn*
+goddam
+jackass
+dumbass
+slut*
+twat*
+wanker*
+nigger*
+nigga*
+fag
+fags
+faggot*
+retard
+retards
+retarded
+spic
+spics
+kike*
+chink
+chinks
+tranny
+# --- Spanish (Latin America and Spain) ---
+puta
+putas
+puto
+putos
+putazo*
+putiza
+puteria
+hijueputa
+chingad*
+chingar*
+chinga
+chingas
+chingo
+chingon*
+chingue*
+pinche
+pinches
+pendej*
+cabron*
+culero*
+culera*
+culo
+culos
+verga
+vergas
+mierda*
+merda*
+joder
+jodido*
+jodida*
+jodete
+jodan
+cono
+carajo
+mamon*
+mamada*
+marica
+maricas
+maricon*
+joto
+jotos
+panocha
+polla
+pollas
+cagar
+cagada*
+cagado*
+cagon*
+tetas
+chichis
+gilipollas
+cojones
+cojon
+huevon*
+mamahuevo*
+malparido*

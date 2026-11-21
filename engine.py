@@ -18,6 +18,8 @@ import logging
 import numpy as np
 import sounddevice as sd
 
+from word_filter import WordFilter, normalize as normalize_key
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_DIR = os.path.join(SCRIPT_DIR, "venv")
 MODELS_DIR = os.path.join(VENV_DIR, "models")
@@ -95,6 +97,12 @@ class TranslatorEngine:
         self.models_loaded = False
         self.listening = False
 
+        # Swear-word filter (word_filter.txt). Applied to English and Spanish before
+        # anything is spoken, shown or saved; also blocks words inside the translator.
+        self.word_filter = WordFilter()
+        self._bad_words_ids = None
+        self.filtered_count = 0
+
         self._stream = None
         self._stop_event = threading.Event()
         self._audio_queue = queue.Queue()
@@ -169,6 +177,7 @@ class TranslatorEngine:
         self._status("loading", "Loading translation model (2 of 3)…")
         self._load_translator(torch)
         self._target_lang_id = self._tokenizer.convert_tokens_to_ids("spa_Latn")
+        self._bad_words_ids = self._build_bad_words_ids()
 
         self._status("loading", "Loading Spanish voice (3 of 3)…")
         from piper.voice import PiperVoice
@@ -182,6 +191,27 @@ class TranslatorEngine:
         # Background workers live for the life of the app
         threading.Thread(target=self._playback_worker, daemon=True).start()
         threading.Thread(target=self._processing_worker, daemon=True).start()
+
+    def _build_bad_words_ids(self):
+        """Find every whole-word piece in the translator's vocabulary that the word filter
+        blocks or replaces, so the model picks a different word instead of producing it."""
+        wf = self.word_filter
+        if not wf.loaded:
+            self._log("[!] word_filter.txt not found; swear-word filter is OFF.")
+            return None
+        t0 = time.time()
+        banned = []
+        for piece, idx in self._tokenizer.get_vocab().items():
+            if not piece.startswith("▁"):      # only pieces that start a word
+                continue
+            word = piece[1:]
+            if len(word) < 3 or not word.isalpha():
+                continue
+            if wf.is_blocked(word) or normalize_key(word) in wf.replacements:
+                banned.append([idx])
+        self._log(f"[+] Word filter: {len(banned)} vocabulary pieces blocked in the translator "
+                  f"({time.time() - t0:.1f}s)")
+        return banned or None
 
     def _load_translator(self, torch):
         """Load NLLB 1.3B (downloading it once if needed); fall back to 600M when offline."""
@@ -398,20 +428,42 @@ class TranslatorEngine:
                 text_en = " ".join(s.text for s in segments).strip()
                 if not text_en or self._stop_event.is_set():
                     continue
-                text_es = self._translate(text_en)
-                self._synthesize(text_es)
+
+                # Word filter, English side: a misheard swear is shown as ••• and
+                # left out of what gets translated.
+                shown_en, n_en = self.word_filter.clean(text_en, mask="•••")
+                to_translate, _ = self.word_filter.clean(text_en, mask="")
+                if not to_translate:
+                    self._note_filtered(n_en)
+                    continue
+
+                text_es = self._translate(to_translate)
+
+                # Word filter, Spanish side: swap risky regional words, drop blocked ones,
+                # before anything is spoken, captioned or saved.
+                text_es, n_es = self.word_filter.clean(text_es, mask="")
+                self._note_filtered(n_en + n_es)
+                if text_es:
+                    self._synthesize(text_es)
                 latency = time.time() - captured_at
                 self.last_delay = latency
-                self._log(f"[EN]: {text_en}\n[ES]: {text_es}")
-                self._on_transcript(time.strftime("%H:%M:%S"), text_en, text_es, latency)
+                self._log(f"[EN]: {shown_en}\n[ES]: {text_es}")
+                self._on_transcript(time.strftime("%H:%M:%S"), shown_en, text_es or "(filtered)", latency)
             except Exception as e:
                 self._log(f"[!] Translation error: {e}")
+
+    def _note_filtered(self, count):
+        if count:
+            self.filtered_count += count
+            # The words themselves are never logged
+            self._log(f"[filter] Changed or removed {count} word(s) in this phrase.")
 
     def _translate(self, text):
         inputs = self._tokenizer(text, return_tensors="pt", padding=True).to(self._device_type)
         tokens = self._translator.generate(
             **inputs, forced_bos_token_id=self._target_lang_id,
-            max_length=128, num_beams=1)
+            max_length=128, num_beams=1,
+            bad_words_ids=self._bad_words_ids)
         return self._tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
 
     def _synthesize(self, text_es):

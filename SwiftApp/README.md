@@ -75,6 +75,19 @@ download an **Enhanced** or **Premium** one (free):
 
 Then reopen the app and choose the voice in **Settings**.
 
+### Swear-word filter
+
+The app uses the same **`../word_filter.txt`** list as the Python app (see the main
+README). It is copied into the app when you run `./build_mac_app.sh` (and into the
+Xcode project for iPad), so **rebuild after editing the list**. Apple's speech
+recognizer also masks offensive English words as it transcribes ("etiquette" option).
+
+Check what the filter does to some text without starting the app:
+
+```bash
+"build/Church Translate.app/Contents/MacOS/ChurchTranslate" --filter-check "Coge tu cruz" "What the f*** happened"
+```
+
 ## Building for iPad (needs Xcode)
 
 1. Install **Xcode** from the Mac App Store (free, large download).
@@ -99,6 +112,7 @@ Then reopen the app and choose the voice in **Settings**.
 | `Sources/ChurchTranslate/AudioCapture.swift` | Microphone (or recording) input, level meter, audio conversion |
 | `Sources/ChurchTranslate/SpanishSpeaker.swift` | Spanish voice output (Piper or Apple) and output meter |
 | `Sources/ChurchTranslate/PiperVoice.swift` | Runs the built-in Piper voice (Mac builds only) |
+| `Sources/ChurchTranslate/WordFilter.swift` | Applies `../word_filter.txt` (swear-word filter) |
 | `Sources/ChurchTranslate/AudioDevices.swift` | Lists and selects audio devices (Mac); audio session (iPad) |
 | `Sources/ChurchTranslate/Meters.swift` | Level meter and status dot |
 | `Sources/ChurchTranslate/CaptionView.swift` | Large Spanish captions for a projector/TV |

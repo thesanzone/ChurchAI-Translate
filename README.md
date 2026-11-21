@@ -42,6 +42,23 @@ Transcripts of every session are saved automatically in
 - **Caption text size**: font size for the projector window.
 - **Start listening as soon as the app is ready**: hands-free start.
 
+### Swear-word filter
+
+Both apps (Python and Swift) check every phrase against **`word_filter.txt`** before
+anything is spoken, shown in captions or saved. This protects against a misheard
+English word or a translation accident (for example "coger", which means "take" in
+Spain but is vulgar in Mexico).
+
+- **[block]** words are never spoken or shown. Blocked English words appear as ••• in
+  the transcript panel; blocked Spanish words are left out of the voice and captions.
+  The Python app also stops the translation model from choosing these words at all.
+- **[replace]** swaps risky words for safe ones (coger → tomar, shittim → acacia).
+- **[allow]** keeps sermon and Bible words such as *hell*, *damnation* and *infierno*.
+
+To add a word, open `word_filter.txt` in TextEdit, add it under the right heading, save,
+and restart the app (the Swift app also needs rebuilding). Filtered words are never
+written to the log or transcripts; the log just notes how many words were changed.
+
 ## For the person setting up the Mac
 
 First-time setup needs a macOS **Administrator** account and an internet connection
@@ -71,6 +88,8 @@ System Settings → Privacy & Security → Microphone.
 | `app.py` | The desktop window (control panel, meters, transcript, captions). |
 | `engine.py` | The translation engine: speech-to-text, translation, Spanish voice. |
 | `app_config.py` | Loads/saves settings in `~/ChurchAI/churchaitranslate.conf`. |
+| `word_filter.txt` | The swear-word list (block / replace / allow). Shared by both apps; safe to edit. |
+| `word_filter.py` | Applies `word_filter.txt` in the Python app. |
 | `start_translation.sh` | Launcher script used by the app: runs setup if needed, then opens the window. |
 | `setup_mac.sh` | One-time installer (Homebrew, Python, AI packages, models). |
 | `venv/` | Python environment and downloaded AI models. Created by setup; not in git. |

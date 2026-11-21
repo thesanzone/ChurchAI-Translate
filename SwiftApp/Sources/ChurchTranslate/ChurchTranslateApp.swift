@@ -37,6 +37,22 @@ struct ChurchTranslateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #endif
 
+    init() {
+        // `--filter-check <text> [<text>…]`: show what the swear-word filter does, then quit.
+        // Runs before any window opens: plain-text arguments would otherwise be treated by
+        // macOS as documents to open, and the main window would never appear.
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "--filter-check"), i + 1 < args.count {
+            setvbuf(stdout, nil, _IOLBF, 0)
+            for text in args[(i + 1)...] {
+                let shown = model.filterEnglish(text, mask: "•••")
+                let voice = model.filterEnglish(text, mask: "")
+                print("[filter-check] \(text)\n   shown: \(shown.text)\n   voice: \(voice.text)   [\(shown.changed) changed]")
+            }
+            exit(0)
+        }
+    }
+
     var body: some Scene {
         WindowGroup("Church Translate") {
             ContentView()

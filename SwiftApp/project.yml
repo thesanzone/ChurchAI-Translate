@@ -10,8 +10,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.1"
-    CURRENT_PROJECT_VERSION: "2.1"
+    MARKETING_VERSION: "2.2"
+    CURRENT_PROJECT_VERSION: "2.2"
 targets:
   ChurchTranslate:
     type: application
@@ -19,6 +19,9 @@ targets:
     sources:
       - path: Sources/ChurchTranslate
       - path: Resources/Assets.xcassets
+      # Swear-word filter list, shared with the Python app
+      - path: ../word_filter.txt
+        buildPhase: resources
     info:
       path: Resources/Info-Xcode.plist
       properties:

@@ -34,6 +34,10 @@ final class TranslatorModel {
     }
     var rows: [TranscriptRow] = []
     var liveEnglish = ""                 // words being heard right now (not final yet)
+    /// Words changed or removed by the swear-word filter since launch (the words aren't kept).
+    var filteredCount = 0
+    /// Swear-word filter loaded from word_filter.txt (shared with the Python app).
+    let wordFilter = WordFilter()
     var inputLevel: Float = 0
     var inputPeak: Float = 0
     var outputLevel: Float = 0
@@ -188,7 +192,9 @@ final class TranslatorModel {
     private func makeTranscriber() -> SpeechTranscriber {
         SpeechTranscriber(
             locale: english,
-            transcriptionOptions: [],
+            // Apple masks offensive English words (e.g. "f***") as it transcribes;
+            // the word filter then removes them before translation.
+            transcriptionOptions: [.etiquetteReplacements],
             reportingOptions: [.volatileResults, .fastResults],
             attributeOptions: [.audioTimeRange])
     }
@@ -329,7 +335,7 @@ final class TranslatorModel {
                             let spokenAt = startTime.addingTimeInterval(result.range.end.seconds)
                             await self.translateAndSpeak(text, spokenAt: spokenAt, using: translator)
                         } else {
-                            self.liveEnglish = text
+                            self.liveEnglish = self.filterEnglish(text, mask: "•••").text
                         }
                     }
                 } catch {
@@ -343,18 +349,58 @@ final class TranslatorModel {
     }
 
     private func translateAndSpeak(_ english: String, spokenAt: Date, using session: TranslationSession) async {
+        // Word filter, English side: misheard swears show as ••• and are left out of the translation
+        let shownEnglish = filterEnglish(english, mask: "•••")
+        let toTranslate = filterEnglish(english, mask: "")
+        guard !toTranslate.text.isEmpty else {
+            noteFiltered(shownEnglish.changed)
+            return
+        }
         do {
-            let spanish = try await session.translate(english).targetText
-            speaker.speak(spanish)
+            let rawSpanish = try await session.translate(toTranslate.text).targetText
+            // Word filter, Spanish side: swap risky regional words and drop blocked ones
+            // before anything is spoken, captioned or saved
+            let spanish = wordFilter.clean(rawSpanish, mask: "")
+            noteFiltered(shownEnglish.changed + spanish.changed)
+            if !spanish.text.isEmpty { speaker.speak(spanish.text) }
             let delay = max(0, Date().timeIntervalSince(spokenAt))
             lastDelay = delay
-            let row = TranscriptRow(time: Date(), english: english, spanish: spanish, delay: delay)
+            let row = TranscriptRow(time: Date(), english: shownEnglish.text,
+                                    spanish: spanish.text.isEmpty ? "(filtered)" : spanish.text, delay: delay)
             rows.append(row)
             writeTranscript(row)
-            print("[EN] \(english)\n[ES] \(spanish)  (delay \(String(format: "%.1f", delay))s)")
+            print("[EN] \(row.english)\n[ES] \(row.spanish)  (delay \(String(format: "%.1f", delay))s)")
         } catch {
             print("[!] Translation error: \(error)")
         }
+    }
+
+    /// Clean English text: Apple's masked words ("f***") plus anything on the block list.
+    func filterEnglish(_ text: String, mask: String) -> (text: String, changed: Int) {
+        var t = text
+        var masked = 0
+        if let re = try? NSRegularExpression(pattern: "\\S*\\*+\\S*") {
+            let ns = t as NSString
+            masked = re.numberOfMatches(in: t, range: NSRange(location: 0, length: ns.length))
+            if masked > 0 {
+                t = re.stringByReplacingMatches(in: t, range: NSRange(location: 0, length: ns.length),
+                                                withTemplate: mask.isEmpty ? "" : mask)
+            }
+        }
+        let cleaned = wordFilter.clean(t, mask: mask)
+        var result = cleaned.text
+        if masked > 0 && mask.isEmpty {
+            result = result.replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            if result.range(of: "\\p{L}", options: .regularExpression) == nil { result = "" }
+        }
+        return (result, masked + cleaned.changed)
+    }
+
+    private func noteFiltered(_ count: Int) {
+        guard count > 0 else { return }
+        filteredCount += count
+        print("[filter] Changed or removed \(count) word(s) in this phrase.")   // never logs the words
     }
 
     func stop() async {

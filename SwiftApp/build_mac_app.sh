@@ -15,6 +15,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ChurchTranslate"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Swear-word filter list, shared with the Python app (edit ../word_filter.txt, then rebuild)
+cp ../word_filter.txt "$APP/Contents/Resources/word_filter.txt"
 
 # Built-in Piper voice (only if ./fetch_piper.sh has been run)
 VOICE_DIR="Vendor/vits-piper-es_MX-ald-medium"
