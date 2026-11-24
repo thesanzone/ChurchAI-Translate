@@ -55,6 +55,52 @@ Requires **macOS 26** or **iPadOS 26** or newer.
   the wrong speakers (that language keeps its captions and transcript and its voice starts
   when the device is back).
 
+## Physical setup (how we use it)
+
+The app needs an audio input (the preacher) and one audio output per language. Using the
+Mac's own 3.5 mm headphone jack works, but we use a **USB audio adapter** instead: an
+inexpensive (under $10) USB sound card with a line input and a line output. It plugs into a
+**USB-C hub** that also powers the laptop, so a single USB-C cable connects or disconnects the
+laptop from the whole setup.
+
+```
+Sound system line out ──(split)──► USB audio adapter IN ──► Mac running Church Translate
+                                                                     │
+Listeners: FM radio + headphones ◄── FM transmitter ◄── headphone amp ◄── USB audio adapter OUT
+                                                              │
+                                                     monitor headphones
+```
+
+1. **Input.** The sound system has a line output, split between several destinations. One
+   feed goes to the USB adapter's input. It carries the preacher's microphone and anything else
+   in the mix (more microphones, video playback). In the app, choose the USB adapter in the
+   **Microphone** menu.
+2. **Output.** The first language's translation goes out of the same USB adapter (choose it as
+   that language's **Output** in the Outputs tab), through its 3.5 mm jack into a small
+   **headphone amplifier**. A volunteer can plug headphones into the amplifier and listen to the
+   translation before it reaches the listeners.
+3. **To the listeners.** The headphone amplifier feeds a small **FM transmitter** for the room.
+   People who need translation pick up a small FM radio and headphones when they arrive.
+
+We use FM rather than Wi-Fi or a phone app because not everyone has a phone, and it greatly
+reduces the tech support needed before and during services: listeners just tune a radio.
+
+**More languages:** give each additional language its own USB audio adapter (all can share
+the hub) and its own FM transmitter on a different frequency, then pick that adapter as the
+language's Output. Label each radio or frequency with its language. For captions, a TV or
+projector can connect to the hub's HDMI port.
+
+**Products we use** (examples only; no affiliation with Amazon or the manufacturers):
+
+| Part | Product |
+|---|---|
+| USB audio adapter (line in + out) | [SABRENT USB External Stereo Sound Card Adapter (AU-MMSA)](https://www.amazon.com/dp/B00IRVQ0F8) |
+| USB-C hub | [Anker USB-C Hub](https://www.amazon.com/dp/B0BQLLB61B) |
+| USB-C power adapter for the hub | [USB-C Power Adapter](https://www.amazon.com/dp/B0B1HJ666G) |
+| FM transmitter | [FM Transmitter for Church and Home](https://www.amazon.com/dp/B0G7MB94RT) |
+| FM radio for each listener | [Retekess portable FM radio with earphones](https://www.amazon.com/dp/B019BYBR48) |
+| Headphone amplifier | Any small headphone amplifier with a 3.5 mm input and outputs |
+
 ## Running the Mac version (no Xcode needed)
 
 ```bash
