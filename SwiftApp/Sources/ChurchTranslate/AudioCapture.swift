@@ -54,6 +54,8 @@ final class AudioCapture: @unchecked Sendable {
     // macOS 27: its input and output share one audio unit, and the engine got no audio.
     private var session: AVCaptureSession?
     private var sink: CaptureSink?
+    /// "Mac's sound" input (SystemAudioTap), when chosen instead of a microphone.
+    private var systemTap: AnyObject?
     private let captureQueue = DispatchQueue(label: "org.churchai.translate.capture")
     #else
     private let engine = AVAudioEngine()
@@ -76,13 +78,29 @@ final class AudioCapture: @unchecked Sendable {
     private func noteAudioArrived() { timeLock.lock(); _lastBuffer = Date(); timeLock.unlock() }
 
     /// Start the microphone. Returns the stream of audio for the speech recogniser.
+    /// Bumped by stop(), so an input that took so long to open that Start gave up on it is
+    /// closed again as soon as it does open.
+    private let generationLock = NSLock()
+    private var _generation = 0
+    private var generation: Int { generationLock.lock(); defer { generationLock.unlock() }; return _generation }
+
     func startMicrophone(deviceUID: String?, analyzerFormat: AVAudioFormat) throws -> AsyncStream<AnalyzerInput> {
+        let startedGeneration = generation
         let stream = prepare(analyzerFormat: analyzerFormat)
         micDeviceUID = deviceUID
         try openMicrophone()
+        guard generation == startedGeneration else {
+            closeMicrophone()
+            throw CaptureError.gaveUp
+        }
         usingMicrophone = true
         noteAudioArrived()
         return stream
+    }
+
+    /// The same microphone now has a different UID (moved to another USB port).
+    func useDevice(_ uid: String) {
+        if usingMicrophone { micDeviceUID = uid }
     }
 
     /// Re-open the microphone after a dropout, feeding the SAME stream so speech recognition
@@ -96,6 +114,7 @@ final class AudioCapture: @unchecked Sendable {
     /// Testing: silently stop the microphone, as a failing USB interface would.
     func simulateMicDropout() {
         #if os(macOS)
+        if #available(macOS 14.2, *), let tap = systemTap as? SystemAudioTap { tap.stop() }
         session?.stopRunning()
         #else
         engine.stop()
@@ -109,15 +128,36 @@ final class AudioCapture: @unchecked Sendable {
         session?.stopRunning()
         session = nil
         sink = nil
+        if #available(macOS 14.2, *), let tap = systemTap as? SystemAudioTap { tap.stop() }
+        systemTap = nil
         #else
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
         #endif
     }
 
+    /// Testing (--simulate-slow-input N): the first open takes N extra seconds, like a stuck device.
+    private static var slowOpenSeconds: Double? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "--simulate-slow-input"), i + 1 < args.count else { return nil }
+        return Double(args[i + 1])
+    }()
+
     private func openMicrophone() throws {
+        if let delay = Self.slowOpenSeconds {
+            Self.slowOpenSeconds = nil
+            print("[test] opening the input slowly (\(Int(delay)) s)")
+            Thread.sleep(forTimeInterval: delay)
+        }
         #if os(macOS)
         let deviceUID = micDeviceUID
+        if deviceUID == SystemAudio.deviceUID {
+            guard #available(macOS 14.2, *) else { throw CaptureError.noMicrophone }
+            let tap = SystemAudioTap()
+            try tap.start { [weak self] buffer in self?.process(buffer) }
+            systemTap = tap
+            return
+        }
         let device = deviceUID.flatMap { AVCaptureDevice(uniqueID: $0) } ?? AVCaptureDevice.default(for: .audio)
         guard let device else { throw CaptureError.noMicrophone }
         let session = AVCaptureSession()
@@ -212,6 +252,7 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func stop() {
+        generationLock.lock(); _generation += 1; generationLock.unlock()
         fileTask?.cancel()
         fileTask = nil
         closeMicrophone()
@@ -307,10 +348,11 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     enum CaptureError: LocalizedError {
-        case noMicrophone, cantSelect
+        case noMicrophone, cantSelect, gaveUp
         var errorDescription: String? {
             switch self {
             case .noMicrophone: "No microphone was found. Check the audio interface is plugged in."
+            case .gaveUp: "The input took too long to open."
             case .cantSelect: "Couldn't open the chosen microphone. Unplug it and plug it back in, press Refresh Devices and Voices, then try again."
             }
         }

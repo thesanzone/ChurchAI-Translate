@@ -4,10 +4,8 @@
 set -e
 cd "$( dirname "${BASH_SOURCE[0]}" )"
 
-# --manifest-cache none: Package.swift checks whether Vendor/ (Piper) exists, but SwiftPM's
-# manifest cache doesn't notice when that changes, so a cached "no Piper" answer could stick.
-swift build -c release --manifest-cache none
-BIN="$(swift build -c release --manifest-cache none --show-bin-path)/ChurchTranslate"
+swift build -c release
+BIN="$(swift build -c release --show-bin-path)/ChurchTranslate"
 
 APP="build/Church Translate.app"
 rm -rf "$APP"
@@ -17,17 +15,6 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Swear-word filter list, shared with the Python app (edit ../word_filter.txt, then rebuild)
 cp ../word_filter.txt "$APP/Contents/Resources/word_filter.txt"
-
-# Built-in Piper voice (only if ./fetch_piper.sh has been run)
-VOICE_DIR="Vendor/vits-piper-es_MX-ald-medium"
-if [ -f "$VOICE_DIR/es_MX-ald-medium.onnx" ]; then
-    mkdir -p "$APP/Contents/Resources/piper"
-    cp "$VOICE_DIR/es_MX-ald-medium.onnx" "$VOICE_DIR/tokens.txt" "$VOICE_DIR/MODEL_CARD" "$APP/Contents/Resources/piper/"
-    cp -R "$VOICE_DIR/espeak-ng-data" "$APP/Contents/Resources/piper/"
-    echo "Included the built-in Piper voice"
-else
-    echo "Note: Piper voice not found (run ./fetch_piper.sh); the app will use Apple voices"
-fi
 
 # Local (ad-hoc) signature so macOS will run it and remember microphone permission.
 codesign --force --sign - "$APP"

@@ -1,9 +1,9 @@
 import AVFoundation
 
-/// Speaks Spanish text with Apple's built-in voices.
-/// The voice is rendered into audio buffers and played through our own audio
-/// engine, so we can pick the output device (on Mac) and drive the output meter.
-final class SpanishSpeaker: NSObject, @unchecked Sendable {
+/// Speaks one language's translation with Apple's voices.
+/// The voice is rendered into audio buffers and played through this speaker's own audio
+/// engine, so each language can go to its own output device (on Mac) and drive its own meter.
+final class Speaker: NSObject, @unchecked Sendable {
     let level = LevelBox()
     private let synth = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
@@ -11,97 +11,116 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
     /// Output volume fader: a gain stage between the voice and the speakers (changes apply instantly).
     private let gainNode = AVAudioUnitEQ(numberOfBands: 0)
 
-    /// Spanish voice volume in dB (the Out fader). Range -24…+12.
+    /// Voice volume in dB (the Volume slider). Range -24…+12.
     var outputGainDB: Float = 0 {
-        didSet { gainNode.globalGain = max(-24, min(12, outputGainDB)) }
+        didSet {
+            // On the engine queue: touching the audio unit from the main thread could freeze
+            // the window while a stuck device is being opened
+            let db = max(-24, min(12, outputGainDB))
+            engineQueue.async { self.gainNode.globalGain = db }
+        }
     }
     private let playFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
     private var converters: [String: AVAudioConverter] = [:]
-    private let queue = DispatchQueue(label: "SpanishSpeaker")
+    private let queue = DispatchQueue(label: "Speaker")
     private var pendingTexts: [String] = []
     private var synthesizing = false
-    private var _waiting = 0
-    private var started = false
+    // State the window reads (waiting count, running, device) sits behind its own small lock,
+    // so reading it never waits on the voice or the audio hardware.
+    private let stateLock = NSLock()
+    private var _waitingCount = 0
+    private var _started = false
+    private var _deviceUID: String?
+    private var _startedAt = Date()
+    private func locked<T>(_ body: () -> T) -> T { stateLock.lock(); defer { stateLock.unlock() }; return body() }
+    private var waitingCount: Int {
+        get { locked { _waitingCount } }
+        set { locked { _waitingCount = newValue } }
+    }
+    private var started: Bool {
+        get { locked { _started } }
+        set { locked { _started = newValue } }
+    }
+    private var outputDeviceUID: String? {
+        get { locked { _deviceUID } }
+        set { locked { _deviceUID = newValue } }
+    }
+    private var startedAt: Date {
+        get { locked { _startedAt } }
+        set { locked { _startedAt = newValue } }
+    }
     /// Increases for every phrase and on Stop, so late callbacks from an old phrase are ignored.
     private var phraseGeneration = 0
     /// Testing: pretend Apple's "phrase finished" signal never arrives for the next phrase.
     var simulateMissingEndSignal = false
     /// Called (on any thread) when the speaker had to recover, e.g. a stuck phrase was skipped.
     var onRecovery: ((String) -> Void)?
-    /// Output device chosen at start, used to reconnect after the audio hardware changes.
-    private var outputDeviceUID: String?
     private var configObserver: NSObjectProtocol?
-    private var startedAt = Date()
     private var forceRecoveryForTest = false
 
+    /// Language code (e.g. "es") used to pick a voice when none is chosen.
+    var language = "es"
+    /// Name used in messages, e.g. "Spanish".
+    var label = "Spanish"
     var voiceIdentifier: String?
     var fast = false
 
-    /// Built-in Piper engine, loaded on first use (takes about a second).
-    private var piper: PiperVoice?
-    private var piperTried = false
-    private var usesPiper: Bool { voiceIdentifier == PiperVoice.identifier && PiperVoice.isAvailable }
+    /// True while the audio engine is running (started, and not stopped since).
+    var isStarted: Bool { started }
+    /// The output device the speaker is playing to (nil = the Mac's default output).
+    var currentDeviceUID: String? { outputDeviceUID }
 
-    /// Load the Piper voice in the background so the first sentence isn't delayed.
-    func preloadPiper() {
-        guard PiperVoice.isAvailable else { return }
-        queue.async { _ = self.loadPiper() }
-    }
-
-    // Runs on `queue`
-    private func loadPiper() -> PiperVoice? {
-        if !piperTried {
-            piperTried = true
-            piper = PiperVoice()
-            print(piper == nil ? "[!] Piper voice failed to load" : "[voice] Piper engine loaded")
-        }
-        return piper
+    enum SpeakerError: LocalizedError {
+        case notConnected
+        var errorDescription: String? { "The speaker output isn't connected." }
     }
 
     /// Number of phrases waiting to be spoken or still speaking.
-    var waiting: Int { queue.sync { _waiting } }
+    var waiting: Int { waitingCount }
 
-    /// True for Apple's old "Eloquence" novelty voices (Eddy, Flo, Grandpa, Rocko…), which sound robotic.
-    static func isNovelty(_ v: AVSpeechSynthesisVoice) -> Bool {
-        v.identifier.contains(".eloquence.") || v.identifier.contains(".speech.synthesis.")
-    }
+    /// All audio-engine work (open, close, recover) happens here, never on the main thread:
+    /// a misbehaving USB audio device can make macOS take many seconds to open it, and that
+    /// must not freeze the app's window.
+    private let engineQueue = DispatchQueue(label: "Speaker.engine")
 
-    /// Natural-sounding Spanish voices installed on this device: Premium, then Enhanced,
-    /// then basic; Mexican Spanish first; Paulina/Mónica ahead of others at the same level.
-    static func spanishVoices() -> [AVSpeechSynthesisVoice] {
-        func score(_ v: AVSpeechSynthesisVoice) -> Int {
-            var s = v.quality.rawValue * 100
-            if v.language == "es-MX" { s += 20 }
-            if v.identifier.contains(".super-compact.") { s -= 10 }   // lowest-fidelity build
-            if ["Paulina", "Mónica", "Monica"].contains(v.name) { s += 5 }
-            return s
+    /// Start playing to `outputDeviceUID` (Mac) in the background, then call `completion` (on
+    /// the engine queue) with nil or the error. If it's already playing to another device it
+    /// moves there. Fails with `.notConnected` if that device isn't plugged in, rather than
+    /// quietly playing through the wrong speakers.
+    func start(outputDeviceUID: String?, completion: @escaping @Sendable (Error?) -> Void) {
+        engineQueue.async {
+            do {
+                try self.startNow(outputDeviceUID: outputDeviceUID)
+                completion(nil)
+            } catch {
+                completion(error)
+            }
         }
-        return AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("es") && !isNovelty($0) }
-            .sorted { score($0) != score($1) ? score($0) > score($1) : $0.name < $1.name }
     }
 
-    /// True when the best installed voice is only basic quality (an Enhanced/Premium download would sound much better).
-    static var onlyBasicVoices: Bool {
-        !(spanishVoices().contains { $0.quality == .enhanced || $0.quality == .premium })
-    }
+    /// Testing (--simulate-slow-output N): the first start takes N extra seconds, like a stuck USB device.
+    private static var slowStartSeconds: Double? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "--simulate-slow-output"), i + 1 < args.count else { return nil }
+        return Double(args[i + 1])
+    }()
 
-    static func describe(_ v: AVSpeechSynthesisVoice) -> String {
-        let region = v.language == "es-MX" ? "Mexico" : v.language == "es-ES" ? "Spain" : v.language
-        let q: String
-        switch v.quality {
-        case .premium: q = " (Premium)"
-        case .enhanced: q = " (Enhanced)"
-        default: q = ""
+    // Runs on engineQueue
+    private func startNow(outputDeviceUID: String?) throws {
+        if let delay = Self.slowStartSeconds {
+            Self.slowStartSeconds = nil
+            print("[test] \(label): opening the output slowly (\(Int(delay)) s)")
+            Thread.sleep(forTimeInterval: delay)
         }
-        // Downloaded voices often already carry the quality in their name, e.g. "Juan (Enhanced)".
-        let name = v.name.replacingOccurrences(of: q.trimmingCharacters(in: .whitespaces), with: "")
-            .trimmingCharacters(in: .whitespaces)
-        return "\(q.isEmpty ? v.name : name), \(region)\(q)"
-    }
-
-    func start(outputDeviceUID: String?) throws {
-        if started { return }
+        if started {
+            if currentDeviceUID == outputDeviceUID { return }
+            stopEngineNow()
+        }
+        #if os(macOS)
+        if let outputDeviceUID, AudioDevices.deviceID(forUID: outputDeviceUID) == nil {
+            throw SpeakerError.notConnected
+        }
+        #endif
         engine.attach(player)
         engine.attach(gainNode)
         gainNode.globalGain = max(-24, min(12, outputGainDB))
@@ -124,36 +143,44 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         // `--mute` (testing): run the whole pipeline without sound
         if ProcessInfo.processInfo.arguments.contains("--mute") { player.volume = 0 }
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            engine.mainMixerNode.removeTap(onBus: 0)
+            engine.detach(player)
+            engine.detach(gainNode)
+            throw error
+        }
         player.play()
-        started = true
         self.outputDeviceUID = outputDeviceUID
         startedAt = Date()
+        started = true
 
         // If the audio hardware changes (USB interface unplugged/replugged, sample rate change),
-        // macOS stops this engine. Restart it so the Spanish voice doesn't go silent.
+        // macOS stops this engine. Restart it so the voice doesn't go silent.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
-            self?.queue.async { self?.recoverOutput(attempt: 1) }
+            self?.engineQueue.async { self?.recoverOutput(attempt: 1) }
         }
     }
 
-    /// Runs on `queue`. Restarts the voice engine after a hardware change, retrying every
+    /// Runs on engineQueue. Restarts the voice engine after a hardware change, retrying every
     /// 2 seconds (for up to 2 minutes) until the chosen speaker output is available again.
     private func recoverOutput(attempt: Int) {
-        guard started else { return }
+        let (isStarted, uid, began) = (started, outputDeviceUID, startedAt)
+        guard isStarted else { return }
         // macOS also sends this notice right after the engine starts; only act if it really stopped
         if attempt == 1, engine.isRunning, !forceRecoveryForTest { return }
         forceRecoveryForTest = false
-        let quiet = Date().timeIntervalSince(startedAt) < 5   // settling after Start: don't alarm anyone
+        let quiet = Date().timeIntervalSince(began) < 5   // settling after Start: don't alarm anyone
         #if os(macOS)
-        if let uid = outputDeviceUID, AudioDevices.deviceID(forUID: uid) == nil {
+        if let uid, AudioDevices.deviceID(forUID: uid) == nil {
             if attempt == 1 {
-                print("[!] Speaker output disconnected; waiting for it to come back")
-                onRecovery?("The speaker output was disconnected. Waiting for it to be plugged back in…")
+                print("[!] \(label) speaker output disconnected; waiting for it to come back")
+                onRecovery?("\(label): the speaker output was disconnected. Waiting for it to be plugged back in…")
             }
             if attempt < 60 {
-                queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
+                engineQueue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
             }
             return
         }
@@ -161,52 +188,60 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         player.stop()
         engine.stop()
         #if os(macOS)
-        if let uid = outputDeviceUID { AudioDevices.assign(uid: uid, to: engine.outputNode) }
+        if let uid { AudioDevices.assign(uid: uid, to: engine.outputNode) }
         #endif
         do {
             engine.prepare()
             try engine.start()
             player.play()
             // Phrases that were scheduled on the old engine are gone; keep the count honest
-            _waiting = pendingTexts.count + (synthesizing ? 1 : 0)
-            print("[voice] Speaker output restarted after an audio hardware change")
-            if !quiet || attempt > 1 { onRecovery?("The speaker output reconnected.") }
+            queue.async { self.waitingCount = self.pendingTexts.count + (self.synthesizing ? 1 : 0) }
+            print("[voice] \(label) speaker output restarted after an audio hardware change")
+            if !quiet || attempt > 1 { onRecovery?("\(label): the speaker output reconnected.") }
         } catch {
-            print("[!] Couldn't restart the speaker output (attempt \(attempt)): \(error)")
+            print("[!] Couldn't restart the \(label) speaker output (attempt \(attempt)): \(error)")
             if attempt < 60 {
-                queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
+                engineQueue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.recoverOutput(attempt: attempt + 1) }
             }
         }
     }
 
     /// Testing: behave as if macOS reported an audio hardware change.
     func simulateOutputDropout() {
-        queue.async {
+        engineQueue.async {
             self.engine.stop()                 // what macOS does on a real hardware change
             self.forceRecoveryForTest = true
             NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: self.engine)
         }
     }
 
+    /// Stop speaking straight away (queued phrases are dropped); the audio engine is closed in
+    /// the background.
     func stop() {
-        queue.sync {
-            pendingTexts.removeAll()
-            _waiting = 0
+        waitingCount = 0
+        queue.async {
+            self.pendingTexts.removeAll()
+            self.waitingCount = 0
             // Forget any phrase in progress: without this, a phrase whose "finished" signal was
             // lost would block the voice even after Stop/Start.
-            synthesizing = false
-            phraseGeneration += 1
+            self.synthesizing = false
+            self.phraseGeneration += 1
         }
         synth.stopSpeaking(at: .immediate)
+        level.set(rms: 0, peak: 0)
+        engineQueue.async { self.stopEngineNow() }
+    }
+
+    // Runs on engineQueue
+    private func stopEngineNow() {
         if let o = configObserver { NotificationCenter.default.removeObserver(o); configObserver = nil }
-        if started {
-            player.stop()
-            engine.mainMixerNode.removeTap(onBus: 0)
-            engine.stop()
-            engine.detach(player)
-            engine.detach(gainNode)
-            started = false
-        }
+        guard started else { return }
+        started = false
+        player.stop()
+        engine.mainMixerNode.removeTap(onBus: 0)
+        engine.stop()
+        engine.detach(player)
+        engine.detach(gainNode)
         level.set(rms: 0, peak: 0)
     }
 
@@ -215,7 +250,7 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         guard !trimmed.isEmpty else { return }
         queue.async {
             self.pendingTexts.append(trimmed)
-            self._waiting += 1
+            self.waitingCount += 1
             self.synthesizeNextIfIdle()
         }
     }
@@ -226,30 +261,14 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         synthesizing = true
         let text = pendingTexts.removeFirst()
 
-        if usesPiper, let piper = loadPiper() {
-            // Python app pacing: 1.11x normally, 1.25x when catching up
-            let speed: Float = (fast || _waiting > 2) ? 1.25 : 1.11
-            if let raw = piper.synthesize(text, speed: speed), let buf = convert(raw), started {
-                player.scheduleBuffer(buf) {
-                    self.queue.async { self._waiting = max(0, self._waiting - 1) }
-                }
-            } else {
-                _waiting = max(0, _waiting - 1)
-            }
-            synthesizing = false
-            synthesizeNextIfIdle()
-            return
-        }
-
         let utterance = AVSpeechUtterance(string: text)
-        if let id = voiceIdentifier, id != PiperVoice.identifier,
-           let v = AVSpeechSynthesisVoice(identifier: id), !SpanishSpeaker.isNovelty(v) {
+        if let id = voiceIdentifier, let v = AVSpeechSynthesisVoice(identifier: id), !Languages.isNovelty(v) {
             utterance.voice = v
         } else {
-            utterance.voice = SpanishSpeaker.spanishVoices().first ?? AVSpeechSynthesisVoice(language: "es-MX")
+            utterance.voice = Languages.voices(for: language).first ?? AVSpeechSynthesisVoice(language: language)
         }
         // Speed up when phrases are piling up, like the Python version
-        let catchUp = fast || _waiting > 2
+        let catchUp = fast || waitingCount > 2
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * (catchUp ? 1.15 : 1.0)
 
         phraseGeneration += 1
@@ -263,12 +282,12 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
         let timeout = 10 + Double(text.count) * 0.05
         queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self, self.synthesizing, self.phraseGeneration == generation else { return }
-            print("[!] Spanish voice: a phrase didn't finish after \(Int(timeout))s; skipping it")
+            print("[!] \(self.label) voice: a phrase didn't finish after \(Int(timeout))s; skipping it")
             self.synth.stopSpeaking(at: .immediate)
             self.phraseGeneration += 1          // ignore anything that phrase sends later
-            self._waiting = max(0, self._waiting - 1)
+            self.waitingCount = max(0, self.waitingCount - 1)
             self.synthesizing = false
-            self.onRecovery?("The Spanish voice skipped a phrase that got stuck.")
+            self.onRecovery?("The \(self.label) voice skipped a phrase that got stuck.")
             self.synthesizeNextIfIdle()
         }
 
@@ -282,10 +301,10 @@ final class SpanishSpeaker: NSObject, @unchecked Sendable {
                     guard self.phraseGeneration == generation else { return }   // stale (skipped or stopped)
                     if let last = lastScheduled {
                         self.player.scheduleBuffer(last) {
-                            self.queue.async { self._waiting = max(0, self._waiting - 1) }
+                            self.queue.async { self.waitingCount = max(0, self.waitingCount - 1) }
                         }
                     } else {
-                        self._waiting = max(0, self._waiting - 1)
+                        self.waitingCount = max(0, self.waitingCount - 1)
                     }
                     self.synthesizing = false
                     self.synthesizeNextIfIdle()

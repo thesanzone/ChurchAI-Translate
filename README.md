@@ -5,6 +5,10 @@ microphone, writes down the English, translates it to Spanish, and speaks the
 Spanish through speakers or headsets. Everything runs on the Mac with no
 internet needed after setup.
 
+> This guide is for the original Python app. The newer **Church Translate** app for Mac and
+> iPad (version 3, in [`SwiftApp/`](SwiftApp/README.md)) can translate into several languages
+> at once, each on its own speakers and captions screen. See its README.
+
 ## For volunteers: running a service
 
 1. Plug in the audio interface (USB Audio Device) **before** opening the app.

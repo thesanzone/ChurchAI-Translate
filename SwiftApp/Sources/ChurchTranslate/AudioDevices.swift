@@ -33,6 +33,21 @@ enum AudioDevices {
         }
     }
 
+    /// A USB audio device plugged into a different port gets a new UID (the USB location is
+    /// part of it), e.g. "…:USB Audio Device:100000:2,1" becomes "…:USB Audio Device:111000:2,1".
+    /// Returns the current UID of the same device, or nil if it isn't connected. If two identical
+    /// devices are connected it can't tell them apart, so it returns nil rather than guess.
+    static func currentUID(for uid: String, in list: [AudioDevice]) -> String? {
+        if list.contains(where: { $0.id == uid }) { return uid }
+        let parts = uid.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count >= 5, parts[0] == "AppleUSBAudioEngine" else { return nil }
+        let matches = list.filter { d in
+            let p = d.id.split(separator: ":", omittingEmptySubsequences: false)
+            return p.count == parts.count && p[0..<3] == parts[0..<3] && p.last == parts.last
+        }
+        return matches.count == 1 ? matches[0].id : nil
+    }
+
     static func deviceID(forUID uid: String) -> AudioDeviceID? {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,

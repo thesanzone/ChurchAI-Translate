@@ -10,8 +10,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.4"
-    CURRENT_PROJECT_VERSION: "2.4"
+    MARKETING_VERSION: "3.0"
+    CURRENT_PROJECT_VERSION: "3.0"
 targets:
   ChurchTranslate:
     type: application
@@ -26,7 +26,8 @@ targets:
       path: Resources/Info-Xcode.plist
       properties:
         CFBundleDisplayName: Church Translate
-        NSMicrophoneUsageDescription: Church Translate listens to the preacher's microphone so it can translate the sermon into Spanish.
+        NSMicrophoneUsageDescription: Church Translate listens to the preacher's microphone so it can translate the sermon.
+        NSAudioCaptureUsageDescription: Church Translate can translate a video or livestream playing on this Mac when you choose "Mac's sound" as the input.
         NSSpeechRecognitionUsageDescription: Church Translate turns the preacher's speech into text on this device so it can be translated.
         UIBackgroundModes: [audio]
         UIApplicationSupportsIndirectInputEvents: true

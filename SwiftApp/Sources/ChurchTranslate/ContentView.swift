@@ -5,40 +5,53 @@ import UniformTypeIdentifiers
 import AppKit
 #endif
 
-/// Window-only state (which sheets are open). Uses ObservableObject/@StateObject so it
+enum MainTab: Hashable { case translate, outputs, settings }
+
+/// Window-only state (tab, sheets, dialogs). Uses ObservableObject/@StateObject so it
 /// also builds with Apple's Command Line Tools, which lack the @State macro plugin.
 final class ContentState: ObservableObject {
-    @Published var showSettings = false
+    @Published var tab: MainTab = .translate
     @Published var showCaptions = false     // iPad full-screen captions
+    @Published var showPreview = false      // iPad captions preview
     @Published var pickRecording = false
     @Published var translationConfig: TranslationSession.Configuration?
+    var downloadLanguage: String?
+    /// The language waiting for "Stop … and remove it?" during a service.
+    @Published var removeCandidate: UUID?
+
+    /// Show Apple's one-time download sheet for a language's translation.
+    @MainActor func download(_ c: LanguageChannel) {
+        downloadLanguage = c.config.language
+        translationConfig = .init(source: Languages.english, target: c.target)
+    }
 }
 
 struct ContentView: View {
     @Environment(TranslatorModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
     @StateObject private var ui = ContentState()
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            TopBar(ui: ui)
             Divider()
-            HStack(spacing: 0) {
-                leftPanel
-                    .frame(width: 330)
-                Divider()
-                transcript
+            TabView(selection: $ui.tab) {
+                TranslateTab(ui: ui)
+                    .tabItem { Label("Translate", systemImage: "captions.bubble") }
+                    .tag(MainTab.translate)
+                OutputsTab(ui: ui)
+                    .tabItem { Label("Outputs", systemImage: "speaker.wave.2") }
+                    .tag(MainTab.outputs)
+                SettingsTab(ui: ui)
+                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tag(MainTab.settings)
             }
-            Divider()
-            bottomBar
         }
-        .frame(minWidth: 900, minHeight: 560)
+        .frame(minWidth: 980, minHeight: 600)
         #if os(macOS)
         // While translating, grey out the red close button so a stray click can't stop a service.
         // (Press Stop first. Quitting with ⌘Q still asks: see AppDelegate.)
         .windowDismissBehavior(model.isListening ? .disabled : .automatic)
         #endif
-        .sheet(isPresented: $ui.showSettings) { SettingsView() }
         .alert("Auto level", isPresented: Binding(
             get: { model.autoLevelMessage != nil },
             set: { if !$0 { model.autoLevelMessage = nil } })) {
@@ -48,8 +61,9 @@ struct ContentView: View {
         }
         #if os(iOS)
         .fullScreenCover(isPresented: $ui.showCaptions) {
-            CaptionView(onClose: { ui.showCaptions = false })
+            CaptionView(channelID: model.onChannels.first?.id, onClose: { ui.showCaptions = false })
         }
+        .sheet(isPresented: $ui.showPreview) { CaptionPreview(onClose: { ui.showPreview = false }) }
         #endif
         .fileImporter(isPresented: $ui.pickRecording,
                       allowedContentTypes: [.audio, .movie]) { result in
@@ -61,15 +75,20 @@ struct ContentView: View {
             }
         }
         .translationTask(ui.translationConfig) { session in
-            // Shows Apple's download sheet for the Spanish translation model if needed
+            // Shows Apple's download sheet for the language's translation model if needed
             try? await session.prepareTranslation()
-            await model.translationDownloaded()
+            if let language = ui.downloadLanguage { await model.translationDownloaded(language) }
         }
     }
+}
 
-    // MARK: - Top bar
+// MARK: - Top bar (all tabs)
 
-    private var topBar: some View {
+private struct TopBar: View {
+    @Environment(TranslatorModel.self) private var model
+    @ObservedObject var ui: ContentState
+
+    var body: some View {
         HStack(spacing: 14) {
             Button {
                 Task {
@@ -82,22 +101,26 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(model.isListening ? Color(red: 0.89, green: 0.29, blue: 0.29) : Color(red: 0.23, green: 0.43, blue: 0.07))
-            .disabled(!model.isReady)
+            .disabled(!(model.isListening || model.canStart))
             .keyboardShortcut(.space, modifiers: [])
 
             statusPill
 
             Spacer()
-            Text("English → Spanish").foregroundStyle(.secondary)
+            Text(languageSummary).foregroundStyle(.secondary).lineLimit(1)
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 Text(elapsed(at: ctx.date))
                     .font(.body.monospacedDigit())
                     .help("Time since Start was pressed")
             }
-            Button("Settings", systemImage: "gearshape") { ui.showSettings = true }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    private var languageSummary: String {
+        let names = model.onChannels.map(\.name)
+        return names.isEmpty ? "English → (no language on)" : "English → " + names.joined(separator: ", ")
     }
 
     private var statusPill: some View {
@@ -110,8 +133,11 @@ struct ContentView: View {
                     Dot(color: color)
                 }
                 Text(text).lineLimit(2)
-                if case .needsTranslationDownload = model.state {
-                    Button("Download Spanish") { ui.translationConfig = .init(source: model.source, target: model.target) }
+                if model.state == .ready, let c = model.languageNeedingDownload, model.activeChannels.isEmpty {
+                    Button("Download \(c.name)") { ui.download(c) }
+                }
+                if model.state == .ready, model.onChannels.isEmpty {
+                    Button("Open Outputs") { ui.tab = .outputs }
                 }
                 if case .error = model.state {
                     Button("Try again") { model.resetError() }
@@ -126,17 +152,23 @@ struct ContentView: View {
     private func status(at now: Date) -> (Color, String) {
         switch model.state {
         case .preparing(let msg): return (.gray, msg)
-        case .needsTranslationDownload: return (.blue, "Spanish translation needs a one-time download.")
-        case .ready: return (.blue, "Ready. Press Start when the service begins.")
+        case .ready where model.isStarting: return (.gray, "Starting…")
+        case .ready:
+            if let problem = model.startProblem { return (.orange, problem) }
+            return (.blue, "Ready. Press Start when the service begins.")
         case .error(let msg): return (.red, msg)
         case .listening:
             let since = model.lastSpeech ?? model.startedAt ?? now
             if model.playingFile == nil, !model.heardAnySignal,
                let start = model.startedAt, now.timeIntervalSince(start) > 3 {
+                if model.usingSystemAudio {
+                    return (.red, "No sound from the Mac yet. Play the video, and check Church Translate is allowed in System Settings → Privacy & Security → Screen & System Audio Recording.")
+                }
                 return (.red, "No sound at all from the microphone. Check it's plugged in and not muted. (The MacBook's built-in mic is off while the lid is closed.)")
             }
             if now.timeIntervalSince(since) > 20 {
-                return (.orange, "Listening, but no sound from the microphone. Check it's on and unmuted.")
+                return (.orange, model.usingSystemAudio ? "Listening to the Mac's sound, but nothing is playing."
+                        : "Listening, but no sound from the microphone. Check it's on and unmuted.")
             }
             if let file = model.playingFile { return (.green, "Playing recording: \(file)") }
             return (.green, "Listening on \(model.deviceName(model.inputUID, in: model.inputDevices))")
@@ -148,8 +180,27 @@ struct ContentView: View {
         let s = Int(now.timeIntervalSince(start))
         return String(format: "%02d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
     }
+}
 
-    // MARK: - Left panel
+// MARK: - Translate tab
+
+struct TranslateTab: View {
+    @Environment(TranslatorModel.self) private var model
+    @ObservedObject var ui: ContentState
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                leftPanel.frame(width: 330)
+                Divider()
+                TranscriptView()
+            }
+            Divider()
+            bottomBar
+        }
+    }
+
+    // MARK: Left panel
 
     private var leftPanel: some View {
         @Bindable var model = model
@@ -164,27 +215,17 @@ struct ContentView: View {
             }
             .labelsHidden()
             .disabled(model.isListening)
-            caption("Speakers / headsets (Spanish out)")
-            Picker("Speakers", selection: $model.outputUID) {
-                ForEach(model.outputDevices) { Text($0.name).tag(Optional($0.id)) }
-                if let uid = model.outputUID, !model.outputDevices.contains(where: { $0.id == uid }) {
-                    Text("Not connected").tag(Optional(uid))
-                }
-            }
-            .labelsHidden()
-            .disabled(model.isListening)
-            Button("Refresh Devices and Voices") { model.refreshDevices() }
-                .help("Re-reads the microphones, speakers and installed Spanish voices")
+            .help("Pick \"Mac's sound\" to translate a video or livestream playing on this Mac")
+            Button("Refresh Devices and Voices") { model.refreshAll() }
+                .help("Re-reads the microphones, speakers and installed voices")
                 .disabled(model.isListening)
                 .frame(maxWidth: .infinity)
             #else
             caption("Microphone (English in)")
             Text(model.inputDevices.first?.name ?? "Built-in microphone")
-            caption("Speakers / headsets (Spanish out)")
-            Text(model.outputDevices.first?.name ?? "iPad speaker")
             Text("Plug in the audio interface before opening the app.")
                 .font(.caption).foregroundStyle(.secondary)
-            Button("Refresh") { model.refreshDevices() }
+            Button("Refresh") { model.refreshAll() }
             #endif
 
             HStack(alignment: .bottom, spacing: 8) {
@@ -207,46 +248,38 @@ struct ContentView: View {
                         .help("While the pastor is speaking, listens for 10 seconds and sets the microphone level automatically.")
                 }
                 .frame(width: 52)
-                VStack(spacing: 4) {
-                    Spacer().frame(height: 14)
-                    LevelMeter(level: meterFraction(model.outputLevel))
-                    Text("Out").font(.caption)
-                }
-                .padding(.leading, 6)
-                VStack(spacing: 4) {
-                    GainFader(db: $model.outputGainDB, range: TranslatorModel.outputGainRange,
-                              help: "Volume of the Spanish voice.")
-                    // Keeps the fader the same height as the input one (which has the Auto button)
-                    Button("Auto") {}.controlSize(.small).hidden()
-                }
-                .frame(width: 52)
                 VStack(alignment: .leading, spacing: 6) {
                     Spacer()
-                    Text("- - -  quiet\nline. Sound\nbelow it is\ntreated as\nsilence.")
+                    Text("- - -  quiet line. Sound below it is treated as silence.")
                         .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     caption("Speech heard")
                     TimelineView(.periodic(from: .now, by: 0.5)) { ctx in
                         Text(heard(at: ctx.date)).font(.title3)
                     }
                     Spacer().frame(height: 18)
                 }
+                .padding(.leading, 6)
             }
             .frame(maxHeight: .infinity)
             .padding(.top, 8)
 
-            Button("Test speakers", systemImage: "speaker.wave.2") { model.testSpeakers() }
-                .frame(maxWidth: .infinity)
-                .disabled(model.isListening)
+            languagesList
 
-            if model.usingBasicAppleVoice {
-                // Easy to miss in Settings, so also warn here before a service starts.
+            Button("Test all outputs", systemImage: "speaker.wave.2") { model.testAllOutputs() }
+                .frame(maxWidth: .infinity)
+                .disabled(model.isListening || model.onChannels.isEmpty)
+                .help("Each language that's on says a short test sentence on its own output")
+
+            if let basic = model.onChannels.first(where: { $0.usesBasicVoice }) {
+                // Easy to miss in the Outputs tab, so also warn here before a service starts.
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("The Spanish voice is a basic Apple voice and sounds robotic.",
+                    Label("The \(basic.name) voice is a basic Apple voice and sounds robotic.",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Choose a better voice…") { ui.showSettings = true }
+                    Button("Choose a better voice…") { ui.tab = .outputs }
                         .controlSize(.small)
                 }
                 .padding(8)
@@ -255,6 +288,66 @@ struct ContentView: View {
             }
         }
         .padding(16)
+    }
+
+    /// Each language's status and voice level, with a link to the Outputs tab.
+    private var languagesList: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            caption("Languages")
+            if model.channels.isEmpty {
+                Text("None yet.").font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(model.channels) { c in
+                HStack(spacing: 8) {
+                    Dot(color: statusColor(c), size: 9)
+                    Text(c.name + (c.config.isOn ? "" : " (off)"))
+                        .foregroundStyle(c.config.isOn ? .primary : .secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    if model.isListening, c.config.isOn, let d = c.lastDelay {
+                        Text(String(format: "%.1fs", d))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(d < 3 ? .green : d < 6 ? .orange : .red)
+                            .help("Delay for \(c.name): from the English being spoken to its translation")
+                    }
+                    HorizontalMeter(level: meterFraction(c.outputLevel))
+                        .frame(width: 70, height: 8)
+                        .opacity(c.config.isOn ? 1 : 0.3)
+                }
+                .font(.callout)
+                .help(statusHelp(c))
+            }
+            Button("Change in Outputs tab") { ui.tab = .outputs }
+                #if os(macOS)
+                .buttonStyle(.link)
+                #else
+                .buttonStyle(.borderless)
+                #endif
+                .font(.caption)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func statusColor(_ c: LanguageChannel) -> Color {
+        guard c.config.isOn else { return .gray.opacity(0.4) }
+        switch c.status {
+        case .checking: return .gray
+        case .needsDownload, .unsupported: return .orange
+        case .ready: return c.deviceMissing || c.outputNotResponding ? .orange : .green
+        }
+    }
+
+    private func statusHelp(_ c: LanguageChannel) -> String {
+        guard c.config.isOn else { return "\(c.name) is turned off" }
+        switch c.status {
+        case .checking: return "Checking \(c.name) translation…"
+        case .needsDownload: return "\(c.name) translation needs a one-time download (Outputs tab)"
+        case .unsupported: return "\(c.name) can't be translated on this device"
+        case .ready:
+            if c.deviceMissing { return "\(c.config.deviceName ?? "Its output") isn't connected" }
+            if c.outputNotResponding { return "\(c.config.deviceName ?? "Its output") isn't responding" }
+            return "\(c.name) is ready"
+        }
     }
 
     private func heard(at now: Date) -> String {
@@ -268,50 +361,7 @@ struct ContentView: View {
         Text(s).font(.caption).foregroundStyle(.secondary)
     }
 
-    // MARK: - Transcript
-
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Time"); Text("English"); Text("Spanish")
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
-                    Divider()
-                    ForEach(model.rows) { row in
-                        GridRow {
-                            Text(row.time.formatted(date: .omitted, time: .standard))
-                                .foregroundStyle(.secondary).font(.callout.monospacedDigit())
-                            Text(row.english).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(row.spanish).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .textSelection(.enabled)
-                        .id(row.id)
-                    }
-                    if !model.liveEnglish.isEmpty {
-                        GridRow {
-                            Text("hearing").foregroundStyle(.secondary).font(.callout)
-                            Text(model.liveEnglish).italic().foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Text("")
-                        }
-                        .id("live")
-                    }
-                }
-                .padding(16)
-            }
-            .onChange(of: model.rows.count) { _, _ in
-                withAnimation { proxy.scrollTo(model.rows.last?.id, anchor: .bottom) }
-            }
-            .onChange(of: model.liveEnglish) { _, _ in
-                proxy.scrollTo("live", anchor: .bottom)
-            }
-        }
-        .font(.system(size: 15))
-    }
-
-    // MARK: - Bottom bar
+    // MARK: Bottom bar
 
     private var bottomBar: some View {
         HStack(spacing: 14) {
@@ -336,16 +386,10 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
             .font(.callout)
             Spacer()
-            Button("Show captions", systemImage: "rectangle.on.rectangle") {
-                #if os(macOS)
-                openWindow(id: "captions")
-                #else
-                ui.showCaptions = true
-                #endif
-            }
+            captionsButton
             Button("Play recording…", systemImage: "waveform") { ui.pickRecording = true }
-                .disabled(model.state != .ready)
-                .help("Translate a sermon recording instead of the microphone, to compare quality")
+                .disabled(!model.canStart)
+                .help("Translate a sermon recording (MP3, M4A, WAV or MP4 video) instead of the microphone")
             Button("Clear") { model.rows.removeAll() }
             #if os(macOS)
             Button("Open transcripts") {
@@ -359,127 +403,93 @@ struct ContentView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }
+
+    @ViewBuilder
+    private var captionsButton: some View {
+        #if os(macOS)
+        let assigned = model.onChannels.filter { $0.config.captionScreenID != nil }
+        if assigned.isEmpty {
+            Button("Set up captions…", systemImage: "rectangle.on.rectangle") { ui.tab = .settings }
+                .help("Choose a projector or TV for each language in Settings → Captions")
+        } else if model.captionsShowing {
+            Button("Hide captions", systemImage: "rectangle.on.rectangle.slash") { model.captionsShowing = false }
+        } else {
+            Button("Show captions", systemImage: "rectangle.on.rectangle") { model.captionsShowing = true }
+                .help(assigned.map { "\($0.name) → \($0.config.captionScreenName ?? "screen")" }.joined(separator: ", "))
+        }
+        #else
+        Button("Show captions", systemImage: "rectangle.on.rectangle") { ui.showCaptions = true }
+            .disabled(model.onChannels.isEmpty)
+        #endif
+    }
 }
 
-// MARK: - Settings
+/// Small horizontal level bar for a language's voice.
+struct HorizontalMeter: View {
+    var level: Double   // 0...1
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule().fill(level > 0.88 ? Color.red : level > 0.7 ? Color.orange : Color.green)
+                    .frame(width: geo.size.width * min(1, max(0, level)))
+            }
+        }
+        .accessibilityLabel("Voice level")
+    }
+}
 
-struct SettingsView: View {
+/// The scrolling English + translations table. A separate view, so it's only redrawn when the
+/// text changes, not every time a level meter moves.
+struct TranscriptView: View {
     @Environment(TranslatorModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        @Bindable var model = model
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Settings").font(.title2.weight(.semibold))
-                .padding([.horizontal, .top], 24)
-                .padding(.bottom, 4)
-            Form {
-                // MARK: Voice
-                Section {
-                    HStack {
-                        Picker("Spanish voice", selection: Binding(
-                            get: { model.voiceID },
-                            set: { model.chooseVoice($0) })) {
-                            ForEach(model.voiceOptions, id: \.id) { v in
-                                Text(v.name).tag(Optional(v.id))
+        let columns = model.channels.filter { $0.config.isOn }
+        return ScrollViewReader { proxy in
+            ScrollView {
+                Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 10) {
+                    GridRow {
+                        Text("Time")
+                        Text("English")
+                        ForEach(columns) { Text($0.name) }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    Divider()
+                    ForEach(model.rows) { row in
+                        GridRow {
+                            Text(row.time.formatted(date: .omitted, time: .standard))
+                                .foregroundStyle(.secondary).font(.callout.monospacedDigit())
+                            Text(row.english).frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(columns) { c in
+                                Text(row.translations[c.id] ?? "")
+                                    .frame(maxWidth: .infinity, alignment: c.isRightToLeft ? .trailing : .leading)
+                                    .multilineTextAlignment(c.isRightToLeft ? .trailing : .leading)
                             }
                         }
-                        Button("Preview") { model.testSpeakers() }
-                            .disabled(model.isListening)
-                            .help("Plays a short Spanish sentence with the chosen voice")
+                        .textSelection(.enabled)
+                        .id(row.id)
                     }
-                    Toggle("Faster Spanish speech", isOn: $model.fastSpeech)
-                    #if os(macOS)
-                    HStack {
-                        Button("Open Voice Settings…", systemImage: "gearshape") { Self.openVoiceSettings() }
-                            .help("Opens System Settings → Accessibility → Spoken Content")
-                        Button("Refresh Voices", systemImage: "arrow.clockwise") { model.refreshDevices() }
-                            .disabled(model.isListening)
-                            .help("Reloads the list after you download or remove a voice")
-                    }
-                    #endif
-                    if model.usingBasicAppleVoice || (model.voiceID != PiperVoice.identifier && SpanishSpeaker.onlyBasicVoices) {
-                        Label {
-                            Text("The chosen voice is one of Apple's basic voices and sounds robotic. "
-                                 + "Pick the built-in voice, or download a Premium or Enhanced voice (steps below).")
-                        } icon: {
-                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    if !model.liveEnglish.isEmpty {
+                        GridRow {
+                            Text("hearing").foregroundStyle(.secondary).font(.callout)
+                            Text(model.liveEnglish).italic().foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(columns) { _ in Text("") }
                         }
-                        .font(.callout.weight(.medium))
-                        .fixedSize(horizontal: false, vertical: true)
+                        .id("live")
                     }
-                    voiceHelp
-                } header: {
-                    Text("Voice Settings").font(.headline)
                 }
-
-                // MARK: Captions
-                Section {
-                    HStack {
-                        Text("Caption text size")
-                        Slider(value: $model.captionSize, in: 28...120, step: 2)
-                        Text("\(Int(model.captionSize)) pt").monospacedDigit().frame(width: 52)
-                    }
-                    Text("Size of the Spanish text in the captions window (for a projector or TV).")
-                        .font(.callout).foregroundStyle(.secondary)
-                } header: {
-                    Text("Caption Text Settings").font(.headline)
-                }
+                .padding(16)
             }
-            .formStyle(.grouped)
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            .onChange(of: model.rows.count) { _, _ in
+                withAnimation { proxy.scrollTo(model.rows.last?.id, anchor: .bottom) }
             }
-            .padding([.horizontal, .bottom], 24)
-            .padding(.top, 8)
+            .onChange(of: model.liveEnglish) { _, _ in
+                proxy.scrollTo("live", anchor: .bottom)
+            }
         }
-        .frame(width: 640, height: 720)
-        .onAppear { model.refreshDevices() }   // picks up newly downloaded voices
+        .font(.system(size: 15))
     }
 
-    /// How the voice list is built, and how to add better voices.
-    private var voiceHelp: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("About the voice list").font(.subheadline.weight(.semibold))
-            VStack(alignment: .leading, spacing: 4) {
-                bullet("**Built in (Piper)**: always available and works offline. The same voice as the Python app.")
-                bullet("**Apple**: every Spanish voice installed on this Mac. Best first: Premium, then Enhanced, then basic; Mexican Spanish ahead of Spain.")
-                bullet("**Hidden**: voices in other languages, and Apple's novelty voices (Eddy, Flo, Grandpa, Rocko and similar), which sound robotic.")
-                bullet("**Premium** sounds the most natural. **Basic** voices (no label) sound robotic; avoid them for services.")
-            }
-            #if os(macOS)
-            Text("Add a better Apple voice (free, one time per Mac)").font(.subheadline.weight(.semibold)).padding(.top, 4)
-            VStack(alignment: .leading, spacing: 4) {
-                bullet("1. Click **Open Voice Settings…** above. System Settings opens at Accessibility → Spoken Content.")
-                bullet("2. Open the **System voice** menu and choose **Manage Voices…** at the bottom.")
-                bullet("3. Find **Spanish (Mexico)** and tick **Paulina (Premium)** or **Paulina (Enhanced)**. Wait for the download to finish.")
-                bullet("4. Come back here and click **Refresh Voices**. Pick the new voice in the list, then click **Preview**.")
-                bullet("To remove a voice later, untick it in the same Manage Voices list.")
-            }
-            #else
-            Text("Add a better voice: Settings → Accessibility → Spoken Content → Voices → Spanish. "
-                 + "Download a Premium or Enhanced voice, then come back here and pick it.")
-            #endif
-        }
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func bullet(_ text: LocalizedStringKey) -> some View {
-        Text(text).fixedSize(horizontal: false, vertical: true)
-    }
-
-    #if os(macOS)
-    /// System Settings → Accessibility → Spoken Content, at the "System voice" setting.
-    /// AX_SPOKEN_VOICE is the anchor System Settings lists for that setting on macOS 27
-    /// (`tell application "System Settings" to get name of every anchor of current pane`).
-    /// If a macOS version doesn't know the anchor, System Settings still opens at Accessibility,
-    /// and the written steps beside the button cover the rest.
-    static func openVoiceSettings() {
-        let link = "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?AX_SPOKEN_VOICE"
-        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
-    }
-    #endif
 }
