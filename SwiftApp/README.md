@@ -14,6 +14,14 @@ and run on the device. The Python app in the folder above is separate and not to
 
 Requires **macOS 26** or **iPadOS 26** or newer.
 
+## What's new in version 3.0.1
+
+- **Support contact** in Settings → About: support@sanzlab.net. About also lists what changed.
+- **iPad:** saved transcripts now appear in the Files app (On My iPad → Church Translate).
+- **App Store preparation:** added the privacy details Apple requires (no data collected), made
+  the iPad icon fully opaque, removed an unused internet permission, and set the version number
+  in one place. Translation works the same as 3.0.
+
 ## What's new in version 3
 
 - **Several languages at once** (Mac). The **Outputs** tab has one row per language:

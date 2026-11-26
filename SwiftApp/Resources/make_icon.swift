@@ -25,7 +25,11 @@ let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
 let px = Int(size)
 let cs = CGColorSpace(name: CGColorSpace.sRGB)!
 guard let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
-                          space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { exit(1) }
+                          space: cs,
+                          // The App Store refuses iPad/iPhone icons that have an alpha channel at all,
+                          // so the full-bleed ios icon is drawn without one.
+                          bitmapInfo: (style == "mac" ? CGImageAlphaInfo.premultipliedLast
+                                                      : CGImageAlphaInfo.noneSkipLast).rawValue) else { exit(1) }
 
 // Work in a 1024-unit, y-down coordinate system
 let k = size / 1024

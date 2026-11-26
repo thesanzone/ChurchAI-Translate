@@ -224,6 +224,11 @@ struct SettingsTab: View {
                     NSWorkspace.shared.open(url)
                 }
             }
+            #else
+            LabeledContent("Saved to") {
+                Text("Files app → On My iPad → Church Translate")
+                    .foregroundStyle(.secondary)
+            }
             #endif
             ForEach(model.channels) { c in
                 LabeledContent("\(c.name) translation") {
@@ -240,14 +245,35 @@ struct SettingsTab: View {
         }
     }
 
+    static let supportEmail = "support@sanzlab.net"
+
+    /// What changed in this version, shown under About.
+    static let whatsNew = [
+        "Support contact added here in About.",
+        "iPad: saved transcripts now appear in the Files app.",
+        "Prepared for the App Store: privacy details, iPad icon and permissions updated.",
+    ]
+
     private var about: some View {
         Section {
             LabeledContent("Church Translate") {
-                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0")")
+                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0.1")")
                     .foregroundStyle(.secondary)
             }
-            Text("Speech recognition, translation and voices are Apple's, and run on this device.")
+            LabeledContent("Support") {
+                if let mail = URL(string: "mailto:\(Self.supportEmail)") {
+                    Link(Self.supportEmail, destination: mail)
+                }
+            }
+            Text("Speech recognition, translation and voices are Apple's, and run on this device. Nothing you say is sent anywhere.")
                 .font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("What's new in 3.0.1") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Self.whatsNew, id: \.self) { Text("• \($0)") }
+                }
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         } header: {
             Text("About")
         }
